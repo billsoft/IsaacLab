@@ -94,12 +94,15 @@ rem -----------------------------------------------------------------------
 
 rem extract the python from isaacsim
 :extract_python_exe
-rem check if using conda
-if not "%CONDA_PREFIX%"=="" (
-    rem use conda python
+rem When _isaac_sim symlink exists (source build), always prefer its bundled Python
+rem to avoid version mismatches with conda/system Python (e.g. conda base=3.10, isaac_sim=3.11).
+if exist "%ISAACLAB_PATH%\_isaac_sim\python.bat" (
+    set python_exe=%ISAACLAB_PATH%\_isaac_sim\python.bat
+) else if not "%CONDA_PREFIX%"=="" (
+    rem use conda python (for pip-based Isaac Sim installs)
     set python_exe=%CONDA_PREFIX%\python.exe
 ) else (
-    rem use kit python
+    rem fallback to kit python path
     set python_exe=%ISAACLAB_PATH%\_isaac_sim\python.bat
 )
 rem check for if isaac sim was installed to system python
