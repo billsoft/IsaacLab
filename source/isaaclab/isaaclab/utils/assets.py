@@ -27,8 +27,14 @@ import omni.client
 # import logger
 logger = logging.getLogger(__name__)
 
-NUCLEUS_ASSET_ROOT_DIR = carb.settings.get_settings().get("/persistent/isaac/asset_root/cloud")
-"""Path to the root directory on the Nucleus Server."""
+_LOCAL_ASSET_ROOT = carb.settings.get_settings().get("/persistent/isaac/asset_root/local")
+"""Local asset root directory (set in kit file, takes priority over cloud)."""
+
+_CLOUD_ASSET_ROOT = carb.settings.get_settings().get("/persistent/isaac/asset_root/cloud")
+"""Cloud asset root URL (S3 fallback when local file not found)."""
+
+NUCLEUS_ASSET_ROOT_DIR = _LOCAL_ASSET_ROOT if _LOCAL_ASSET_ROOT else _CLOUD_ASSET_ROOT
+"""Path to the root directory for assets. Uses local path if configured, otherwise cloud URL."""
 
 NVIDIA_NUCLEUS_DIR = f"{NUCLEUS_ASSET_ROOT_DIR}/NVIDIA"
 """Path to the root directory on the NVIDIA Nucleus Server."""
@@ -40,8 +46,23 @@ ISAACLAB_NUCLEUS_DIR = f"{ISAAC_NUCLEUS_DIR}/IsaacLab"
 """Path to the ``Isaac/IsaacLab`` directory on the NVIDIA Nucleus Server."""
 
 
+def _to_cloud_path(path: str) -> str | None:
+    """Converts a local asset path to its S3 cloud equivalent for fallback."""
+    if not _LOCAL_ASSET_ROOT or not _CLOUD_ASSET_ROOT:
+        return None
+    local_norm = _LOCAL_ASSET_ROOT.replace("\\", "/").rstrip("/")
+    path_norm = path.replace("\\", "/")
+    if path_norm.startswith(local_norm):
+        rel = path_norm[len(local_norm):]
+        return _CLOUD_ASSET_ROOT.rstrip("/") + rel
+    return None
+
+
 def check_file_path(path: str) -> Literal[0, 1, 2]:
-    """Checks if a file exists on the Nucleus Server or locally.
+    """Checks if a file exists locally or on the Nucleus/cloud server.
+
+    Checks local filesystem first. If not found and a local asset root is configured,
+    automatically falls back to the cloud (S3) equivalent path.
 
     Args:
         path: The path to the file.
@@ -51,10 +72,14 @@ def check_file_path(path: str) -> Literal[0, 1, 2]:
 
         * :obj:`0` if the file does not exist
         * :obj:`1` if the file exists locally
-        * :obj:`2` if the file exists on the Nucleus Server
+        * :obj:`2` if the file exists on the Nucleus Server or cloud
     """
     if os.path.isfile(path):
         return 1
+    # Try cloud fallback when a local root is configured but file is missing locally
+    cloud_path = _to_cloud_path(path)
+    if cloud_path and omni.client.stat(cloud_path)[0] == omni.client.Result.OK:
+        return 2
     # we need to convert backslash to forward slash on Windows for omni.client API
     elif omni.client.stat(path.replace(os.sep, "/"))[0] == omni.client.Result.OK:
         return 2
@@ -97,13 +122,15 @@ def retrieve_file_path(path: str, download_dir: str | None = None, force_downloa
         # create download directory if it does not exist
         if not os.path.exists(download_dir):
             os.makedirs(download_dir)
+        # use cloud fallback URL for downloading if local file was missing
+        download_path = _to_cloud_path(path) or path
         # download file in temp directory using os
-        file_name = os.path.basename(omni.client.break_url(path.replace(os.sep, "/")).path)
+        file_name = os.path.basename(omni.client.break_url(download_path.replace(os.sep, "/")).path)
         target_path = os.path.join(download_dir, file_name)
         # check if file already exists locally
         if not os.path.isfile(target_path) or force_download:
             # copy file to local machine
-            result = omni.client.copy(path.replace(os.sep, "/"), target_path, omni.client.CopyBehavior.OVERWRITE)
+            result = omni.client.copy(download_path.replace(os.sep, "/"), target_path, omni.client.CopyBehavior.OVERWRITE)
             if result != omni.client.Result.OK and force_download:
                 raise RuntimeError(f"Unable to copy file: '{path}'. Is the Nucleus Server running?")
         return os.path.abspath(target_path)
