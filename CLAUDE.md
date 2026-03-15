@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 沟通语言
 
-**始终用中文与用户沟通。** 所有回复、解释、问题均使用中文。
+**始终用中文（简体中文）与用户沟通。** 所有回复、解释、问题均使用中文。
+**严禁使用朝鲜语（한국어）和日语（日本語/ひらがな/カタカナ）文字。** 若需引用代码注释中的外文，保留原文但解释用中文。
 
 ## Overview
 
