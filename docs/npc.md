@@ -1,40 +1,215 @@
-**我为你推荐的最优方案：Isaacsim.Replicator.Agent (IRA) 扩展**（2026年3月最新官方确认，这是目前与 Isaac Lab 兼容性**最确定、最无缝**的 actor 自动移动控制工具）。
+# NPC 角色动画集成指南
 
-我没有单纯推荐，而是先通过官方文档和 GitHub 讨论**实时搜索验证**（包括 Isaac Sim 6.0+ 版本文档、旧版 deprecation 说明、Isaac Lab 迁移指南），确认它是最合适的：
+## 核心结论
 
-- **为什么是 IRA（不是 Omni.Anim.People）**：Omni.Anim.People 已明确**被弃用**（官方多次警告“being deprecated in the next release”），而 IRA 是它的**官方替换**，功能更强大、资源更丰富。
-- **与 Isaac Lab 的衔接兼容性**：IRA 是**原生 Kit 扩展**（和 Isaac Lab 一样基于 Omniverse Kit），可直接在 Isaac Lab 的 standalone 脚本、环境配置或 Replicator 数据生成流程中启用。Isaac Lab 迁移文档和 Isaac Sim 核心文档都没有冲突记录（Isaac Lab 可加载任何带 NavMesh 的 USD 场景并调用 IRA 的行为控制器）。实际使用中，Isaac Lab 用户常用它生成带标注的多镜头数据（正好匹配你之前的体素 + 多相机训练需求）。
-- **自动行动/移动控制能力**：专为**行人、骑车人、摩托车人**（human characters）设计，支持：
-  - NavMesh 自动导航 + 路径跟随（你规划的路线点直接生效）。
-  - omni.behavior.composer 控制器（walk、queue、idle 等行为循环）。
-  - 自动来回移动、避障、按规划路线巡逻。
-  - 支持 rigged 资产（ActorCore 人物 + 自行车/摩托动画），可实现骑车/摩托真实移动。
-- **资源丰富程度**：超高——带完整 UI 面板（Tools > Action and Event Data Generation）、YAML 配置模板、Python 脚本（actor_sdg.py）、样例 configs、GPU 加速（30 FPS+）、多传感器输出（完美喂你的体素模型训练）。
+| 方案 | 动画 | Standalone 兼容 | 复杂度 | 推荐 |
+|------|------|----------------|--------|------|
+| Isaac People + omni.anim.people | ✅ | ❌ GUI 限定（Python OGN 注册失败） | 高 | 仅 GUI |
+| **Mixamo + UsdSkel 直接播放** | ✅ | ✅ | 中 | **推荐** |
+| 胶囊体占位符 | N/A | ✅ | 低 | 纯数据收集 |
 
-**为什么只推荐这一个**（而不是两个）？搜索后发现这是**唯一**同时满足“Isaac Lab 高兼容 + 人物/骑车自动路径控制 + 资源最丰富”的官方方案。其他（如纯 Action Graph 或 robot path-tracking）要么只适合机器人、要么不够 actor 专用。
+**为什么 Mixamo + UsdSkel 在 Standalone 下可行：**
 
-### 如何快速接入（与 Isaac Lab 衔接步骤）
-1. 在 Isaac Sim / Isaac Lab 里启用扩展（Window > Extensions）：
-   - 搜索并启用 isaacsim.replicator.agent.core + isaacsim.replicator.agent.ui。
-2. 打开 UI（Tools > Action and Event Data Generation > Actor SDG）。
-3. 加载样例 YAML 配置（路径在 Isaac Sim 安装目录下的 extscache/isaacsim.replicator.agent.core-*/data/sample_configs/）。
-4. 设置 NavMesh（场景必备），添加你的行人/骑车资产，定义行为 + 路径 → 点击 Set Up Simulation + Start。
-5. 在 Isaac Lab 脚本里直接调用（Python）：
-   ```python
-   # 示例（在你的 standalone 或环境里）
-   import omni.isaac.core as core
-   # ... 加载场景后启用 IRA 配置
-   ```
-   （完整脚本可在官方教程复制）。
+Isaac People 角色的动画依赖 `omni.anim.graph.core` 的 locomotion 状态机选择动画片段——
+这个系统在 Standalone 模式下 Python OGN 注册失败，动画无法播放，角色保持 T-pose。
 
-**官方资料地址**（全部 2026 年最新、实时有效，我已验证）：
-- **IRA 主教程（最完整，含移动控制、NavMesh、行为配置）**：  
-  https://docs.isaacsim.omniverse.nvidia.com/6.0.0/action_and_event_data_generation/tutorial_replicator_agent.html
-- **启用与样例配置说明**（兼容 Isaac Lab 流程）：  
-  https://docs.isaacsim.omniverse.nvidia.com/4.5.0/replicator_tutorials/tutorial_replicator_agent.html
-- **旧版 Omni.Anim.People deprecation 警告**（确认替换原因）：  
-  https://docs.isaacsim.omniverse.nvidia.com/5.1.0/action_and_event_data_generation/ext_replicator-agent/ext_omni_anim_people.html
+Mixamo 导出的 USD 包含直接的 UsdSkel 时间采样数据（SkelAnimation prim），
+不需要任何状态机——`timeline.play()` 时间轴推进，骨骼关键帧自动插值，角色自然行走。
+位置控制仍用我们的 XformOp Wrapper 方案。
 
-**实际效果**：装好后 10 分钟就能让几十个行人/骑车人在你规划的仓库/街道路线上来回自动移动，输出多镜头 RGB/Depth 数据，直接喂你的体素预测模型。和 Isaac Lab 的 TiledCamera + RL 训练结合得天衣无缝（很多用户已这么做数据生成）。
+---
 
-如果你装好后想让我给你**具体 YAML 配置模板 + Isaac Lab 集成脚本**（含路径点定义、骑车动画），或者卡在 NavMesh 步骤，把你的 Isaac Sim 版本贴出来，我继续一步步帮你！这个 IRA 是目前最稳、最丰富的选择，绝对不会踩坑。加油，你的场景搭建 + 自动移动马上就能跑通！🚀
+## 工作流程
+
+### 第一步：从 Mixamo 下载资产
+
+访问 **mixamo.com**（Adobe 账号免费注册）：
+
+1. 搜索选择一个人物角色（推荐 "Y Bot" 或任意人形角色）
+2. 先下载**带皮肤的角色 + Walk 动画**（Format: FBX, Skin: With Skin, Frames: 30fps）
+3. 再下载其他动画（如 Idle）时选 **Without Skin**，绑定到同一个角色
+
+推荐动画：
+- `Walking`（标准行走循环，约 1 秒/循环）
+- `Idle`（站立等待）
+- `Female Walking`（女性角色）
+
+### 第二步：Blender 处理（必须步骤——添加 Root Bone）
+
+Mixamo 默认没有根骨骼，Hips 直接是骨架根。这会导致行走时角色漂移。
+我们需要加一个固定在原点的 Root 骨骼作为 Hips 的父级。
+
+**安装 Blender**（免费，官网下载 4.x 版本）
+
+**操作步骤：**
+
+```
+1. File → Import → FBX → 选择下载的 FBX 文件
+   （Import 设置：Armature → Automatic Bone Orientation ✓）
+
+2. 在 Outliner 里选中角色的 Armature
+
+3. 进入 Edit Mode（Tab 键）
+
+4. 添加根骨骼：
+   Shift+A → Bone
+   将新骨骼命名为 "Root"
+   位置设为原点 (0, 0, 0)，方向朝上
+
+5. 将 "Hips" 骨骼的 Parent 设为 "Root"
+   选中 Hips → Bone Properties → Parent → 选 Root
+
+6. 回到 Object Mode
+
+7. 导出 FBX：
+   File → Export → FBX
+   设置：
+     - Apply Scalings: FBX Units Scale
+     - Forward: -Z Forward
+     - Up: Y Up
+     - Armature → Add Leaf Bones: ✗ 不勾选
+     - Baked Animation ✓
+```
+
+### 第三步：FBX 转 USD（使用 Isaac Sim 内置转换器）
+
+Isaac Sim 内置了 `omni.kit.asset_converter`，可以直接将 FBX 转为 USD：
+
+**方式 A：命令行转换脚本**（推荐，一次性执行）
+
+```python
+# scripts/tools/convert_fbx_to_usd.py
+# 运行：isaaclab.bat -p scripts/tools/convert_fbx_to_usd.py
+
+import argparse
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input",  required=True, help="输入 FBX 路径")
+parser.add_argument("--output", required=True, help="输出 USD 路径")
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args()
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+import asyncio
+import omni.kit.asset_converter as converter
+
+async def convert(input_path: str, output_path: str):
+    ctx = converter.AssetConverterContext()
+    ctx.ignore_animation     = False   # 保留动画数据
+    ctx.export_animations    = True
+    ctx.bake_all_blend_shapes = False
+    ctx.merge_all_meshes     = False
+
+    instance = converter.get_instance()
+    task = instance.create_converter_task(input_path, output_path, None, ctx)
+    success = await task.wait_until_finished()
+    if success:
+        print(f"[Convert] 成功：{output_path}")
+    else:
+        print(f"[Convert] 失败：{task.get_status_string()}")
+
+asyncio.ensure_future(convert(args.input, args.output))
+for _ in range(200):
+    simulation_app.update()
+
+simulation_app.close()
+```
+
+**运行示例：**
+```bat
+isaaclab.bat -p scripts/tools/convert_fbx_to_usd.py ^
+  --input  D:/Downloads/mixamo_walk.fbx ^
+  --output D:/code/IsaacLab/Assets/Custom/Characters/mixamo_worker/mixamo_worker.usd ^
+  --headless
+```
+
+**方式 B：Isaac Sim GUI 手动转换**
+```
+File → Import → FBX
+保存为 USD 即可
+```
+
+### 第四步：验证 USD 结构
+
+转换成功的 USD 应包含：
+
+```
+/Root                     ← 场景根
+  /Armature               ← SkelRoot prim（UsdSkelBindingAPI）
+    /Armature/Skeleton    ← Skeleton prim（关节层级）
+    /mixamorig:Hips/...   ← 网格 prim（蒙皮绑定）
+    /mixamorig:Hips_anim  ← SkelAnimation prim（行走关键帧数据）
+```
+
+验证脚本（可选）：
+```python
+# 在 Python 中快速检查 USD 结构
+from pxr import Usd, UsdSkel
+stage = Usd.Stage.Open("D:/code/IsaacLab/Assets/Custom/Characters/mixamo_worker/mixamo_worker.usd")
+for prim in stage.Traverse():
+    if prim.IsA(UsdSkel.Root) or prim.IsA(UsdSkel.Animation):
+        print(prim.GetPath(), prim.GetTypeName())
+# 应看到 SkelRoot 和 SkelAnimation 各至少一个
+```
+
+---
+
+## 与巡逻脚本的集成
+
+完整集成方案：`scripts/npc/npc_mixamo_patrol.py`
+
+### 关键设计
+
+```
+/World/Characters/
+  Worker_01/               ← Wrapper Xform（PatrolAgent 控制位置和朝向）
+    Char/                  ← Mixamo USD 引用（timeline 推进时 UsdSkel 自动播放行走动画）
+```
+
+`PatrolAgent` 每帧：
+1. 更新 Wrapper 的 `translate` op → 角色移动到新位置
+2. 更新 Wrapper 的 `rotateY` op → 角色面朝行进方向
+3. `timeline.play()` 让时间轴自动推进 → SkelAnimation 关键帧自动插值 → 腿/手臂动作
+
+动画循环：设置 `timeline.set_looping(True)` 加上行走循环的时长（通常 30-60 帧）。
+
+---
+
+## 文件存放建议
+
+```
+D:/code/IsaacLab/Assets/Custom/Characters/
+  mixamo_worker_male/
+    mixamo_worker_male.usd       ← 主 USD（含骨架 + 行走动画）
+    mixamo_worker_male_idle.usd  ← 可选：独立 idle 动画
+  mixamo_worker_female/
+    mixamo_worker_female.usd
+```
+
+---
+
+## 已知问题和解决方案
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| 转换后角色漂移/滑步 | Mixamo 无 Root bone，Hips 直接平移 | Blender 加 Root bone（见第二步） |
+| 角色侧身倒地 | FBX 导出轴设置错误 | Blender 导出时 Forward=-Z, Up=Y |
+| 动画不循环 | 时间轴到末尾停止 | `timeline.set_looping(True)` |
+| 转换后无动画数据 | 转换时 ignore_animation=True | 确认 `ctx.ignore_animation = False` |
+| T-pose（无关键帧） | SkelAnimation prim 路径错误 | 验证 USD 结构（见第四步） |
+| 规模比例错误（角色很小或很大） | FBX 单位 cm vs m | Blender 导出 Apply Scalings: FBX Units Scale |
+
+---
+
+## 与 Isaac People 的对比
+
+| 特性 | Isaac People | Mixamo + UsdSkel |
+|------|-------------|-----------------|
+| 动画驱动方式 | omni.anim.graph.core 状态机 | UsdSkel 时间采样（直接播放） |
+| Standalone 模式 | ❌ Python OGN 注册失败 | ✅ timeline.play() 直接工作 |
+| 自定义动画种类 | 少（官方提供） | 多（几千个 Mocap） |
+| NavMesh 路径跟随 | ✅ 内置 | ❌ 需要自己用 XformOp 驱动 |
+| 资产来源 | 随 Isaac Sim 分发 | 需要下载 + 转换 |
+| 准备工作量 | 零 | 中等（Blender + 转换） |

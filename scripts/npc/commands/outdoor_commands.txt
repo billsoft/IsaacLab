@@ -1,0 +1,13 @@
+# 自动生成的 NPC 巡逻命令
+Worker_01 GoTo -8.0 0.0 2.0 -90
+Worker_01 Idle 0.5
+Worker_01 GoTo 8.0 0.0 2.0 90
+Worker_01 Idle 0.5
+Worker_02 GoTo -8.0 0.0 0.0 -90
+Worker_02 Idle 0.5
+Worker_02 GoTo 8.0 0.0 0.0 90
+Worker_02 Idle 0.5
+Worker_03 GoTo -8.0 0.0 -2.0 -90
+Worker_03 Idle 0.5
+Worker_03 GoTo 8.0 0.0 -2.0 90
+Worker_03 Idle 0.5

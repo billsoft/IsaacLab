@@ -87,8 +87,8 @@ def configure_people_settings():
     # 无限循环
     s.set("/exts/omni.anim.people/command_settings/number_of_loop", "inf")
 
-    # 关闭 NavMesh（不需要烘焙，角色直线走到目标点）
-    s.set("/exts/omni.anim.people/navigation_settings/navmesh_enabled", False)
+    # 启用 NavMesh（GoTo 命令需要 NavMesh 驱动移动）
+    s.set("/exts/omni.anim.people/navigation_settings/navmesh_enabled", True)
     s.set("/exts/omni.anim.people/navigation_settings/dynamic_avoidance_enabled", False)
 
     # 角色 prim 根路径
@@ -120,6 +120,49 @@ def load_scene():
 
     carb.log_info("[NPC] Scene loaded.")
     return context.get_stage()
+
+
+def add_navmesh_volume(stage):
+    """
+    在场景中添加 NavMesh Volume prim，覆盖整个仓库地面区域。
+    omni.anim.navigation.core 需要至少一个 NavMeshVolume 才能烘焙导航网格。
+    """
+    vol_path = "/World/NavMesh/Volume"
+    if stage.GetPrimAtPath(vol_path).IsValid():
+        carb.log_info("[NPC] NavMesh volume already exists, skipping.")
+        return
+
+    # 确保父节点存在
+    if not stage.GetPrimAtPath("/World/NavMesh").IsValid():
+        stage.DefinePrim("/World/NavMesh", "Xform")
+
+    # 创建 NavMeshVolume（需要 omni.anim.navigation.schema）
+    try:
+        from omni.anim.navigation.core import NavmeshVolumeScheme
+        NavmeshVolumeScheme.Apply(stage.DefinePrim(vol_path, "Cube"))
+    except Exception:
+        # 若 schema API 不可用，手动用 Cube + 语义标签代替
+        vol_prim = stage.DefinePrim(vol_path, "Cube")
+        vol_prim.CreateAttribute("omni:navmesh:isVolume", Sdf.ValueTypeNames.Bool).Set(True)
+
+    # 设置 Volume 覆盖范围：仓库地面约 20m×1m×20m（XYZ），居中于原点
+    xform = UsdGeom.Xformable(stage.GetPrimAtPath(vol_path))
+    xform.ClearXformOpOrder()
+    xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.5, 0.0))   # 中心稍高于地面
+    xform.AddScaleOp().Set(Gf.Vec3f(20.0, 1.0, 20.0))      # 半边长，实际范围 ±20m
+
+    carb.log_info(f"[NPC] NavMesh volume added at {vol_path}")
+
+
+def bake_navmesh():
+    """触发 NavMesh 烘焙并等待完成"""
+    try:
+        import omni.anim.navigation.core as nav_core
+        nav = nav_core.acquire_interface()
+        nav.start_navmesh_baking()
+        carb.log_info("[NPC] NavMesh baking started.")
+    except Exception as e:
+        carb.log_warn(f"[NPC] NavMesh baking skipped: {e}")
 
 
 def add_characters(stage):
@@ -167,31 +210,47 @@ def add_characters(stage):
 
 def get_npc_positions():
     """读取所有 NPC 的当前世界坐标"""
+    # ── 方法1：GlobalCharacterPositionManager（尝试多种键格式）──────────────
+    mgr_positions = {}
     try:
         from omni.anim.people.scripts.global_character_position_manager import GlobalCharacterPositionManager
         mgr = GlobalCharacterPositionManager.get_instance()
-        positions = {}
+        all_keys = set(mgr._character_positions.keys())
+
         for name in [c["name"] for c in NPC_CONFIG]:
-            # prim 路径格式: /World/Characters/Worker_01
             prim_path = f"{CHARACTER_ROOT_PRIM}/{name}"
-            # GlobalCharacterPositionManager 以 SkelRoot prim 为键
-            pos = mgr._character_positions.get(prim_path) or mgr._character_positions.get(f"{prim_path}/SkelRoot")
-            positions[name] = pos
-        return positions
-    except Exception as e:
-        # 备用方案：直接读 USD XformOp
-        stage = omni.usd.get_context().get_stage()
-        positions = {}
-        for cfg in NPC_CONFIG:
-            prim = stage.GetPrimAtPath(f"{CHARACTER_ROOT_PRIM}/{cfg['name']}")
-            if prim.IsValid():
-                xform = UsdGeom.Xformable(prim)
-                mat = xform.ComputeLocalToWorldTransform(0)
-                t = mat.ExtractTranslation()
-                positions[cfg["name"]] = (t[0], t[1], t[2])
-            else:
-                positions[cfg["name"]] = None
-        return positions
+            pos = (
+                mgr._character_positions.get(prim_path)
+                or mgr._character_positions.get(f"{prim_path}/SkelRoot")
+                or mgr._character_positions.get(name)   # 只用名字作为键
+            )
+            # 若还是 None，尝试遍历所有键找包含该名字的条目
+            if pos is None:
+                for key, val in mgr._character_positions.items():
+                    if name in key and val is not None:
+                        pos = val
+                        break
+            mgr_positions[name] = pos
+    except Exception:
+        pass
+
+    # ── 方法2：直接读 USD XformOp（始终作为兜底，且作为运动真值）──────────
+    stage = omni.usd.get_context().get_stage()
+    positions = {}
+    for cfg in NPC_CONFIG:
+        name = cfg["name"]
+        prim = stage.GetPrimAtPath(f"{CHARACTER_ROOT_PRIM}/{name}")
+        if prim.IsValid():
+            xform = UsdGeom.Xformable(prim)
+            mat = xform.ComputeLocalToWorldTransform(0)
+            t = mat.ExtractTranslation()
+            usd_pos = (t[0], t[1], t[2])
+        else:
+            usd_pos = None
+
+        # 优先用 manager 结果（包含动画驱动的位置），否则用 USD XformOp
+        positions[name] = mgr_positions.get(name) or usd_pos
+    return positions
 
 
 def main():
@@ -208,16 +267,26 @@ def main():
     print("[NPC] Step 3: Loading scene...")
     stage = load_scene()
 
-    # ── Step 4: 添加 NPC 角色 + 挂载行为脚本 ─────────────────────────────────
-    print("[NPC] Step 4: Adding NPC characters...")
+    # ── Step 4: 添加 NavMesh Volume 并烘焙导航网格 ───────────────────────────
+    print("[NPC] Step 4: Setting up NavMesh...")
+    add_navmesh_volume(stage)
+    for _ in range(5):
+        simulation_app.update()
+    bake_navmesh()
+    # 等待烘焙完成（通常需要几帧）
+    for _ in range(30):
+        simulation_app.update()
+
+    # ── Step 5: 添加 NPC 角色 + 挂载行为脚本 ─────────────────────────────────
+    print("[NPC] Step 5: Adding NPC characters...")
     add_characters(stage)
 
     # 让 Kit 处理一帧，使 Scripting API 生效
     for _ in range(10):
         simulation_app.update()
 
-    # ── Step 5: 开始仿真，读取位置 ────────────────────────────────────────────
-    print("[NPC] Step 5: Starting simulation... Press Ctrl+C to stop.")
+    # ── Step 6: 开始仿真，读取位置 ────────────────────────────────────────────
+    print("[NPC] Step 6: Starting simulation... Press Ctrl+C to stop.")
     print("[NPC] NPCs will walk along paths defined in commands/people_commands.txt")
     print("-" * 60)
 
