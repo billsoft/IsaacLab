@@ -236,6 +236,23 @@ camera.set_ftheta_properties(
 - `set_opencv_fisheye_properties()` → 只是后处理畸变，不改变底层渲染 FOV，不适合超广角
 - Isaac Lab 的 `FisheyeCameraCfg` 仍使用旧 `cameraProjectionType`，在 5.x 可能不工作
 
+**直接操作 USD prim 设置 ftheta（IRA 场景下必须用此方式）**：
+```python
+# 关键：必须先 ApplyAPI 注册 schema，渲染器才会识别 ftheta 属性！
+# 不 ApplyAPI → 属性存在但渲染器忽略 → 退化为普通广角相机
+prim.ApplyAPI("OmniLensDistortionFthetaAPI")
+prim.GetAttribute("omni:lensdistortion:model").Set("ftheta")
+
+# 属性名必须用 k0-k4（不是 p0-p4！）
+prim.GetAttribute("omni:lensdistortion:ftheta:k0").Set(0.0)
+prim.GetAttribute("omni:lensdistortion:ftheta:k1").Set(float(K1_EQUIDISTANT))
+# ...
+
+# opticalCenter 是元组（不是分开的 opticalCentreX/Y！）
+prim.GetAttribute("omni:lensdistortion:ftheta:opticalCenter").Set((cx, cy))
+prim.GetAttribute("omni:lensdistortion:ftheta:maxFov").Set(157.2)
+```
+
 ### f-theta 多项式公式
 
 ```
@@ -255,7 +272,7 @@ Isaac Sim 的 `camera.get_rgb()` 有 **1-2 帧管线延迟**：
 
 - 默认光轴 = **+X**（不是 USD 的 -Z）
 - 坐标系：+X = 前(光轴), +Y = 左, +Z = 上
-- 向下俯视：`euler = [0, 90, 0]`（绕 Y 轴 90°，使 +X 指向世界 -Z）
+- 向下俯视：`euler = [0, 0, 90]`（绕 Z 轴 90°，使 +X 指向世界 -Z）
 
 ### set_focal_length / set_horizontal_aperture 单位
 

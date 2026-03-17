@@ -377,8 +377,8 @@ for cam_path, y_offset in [(left_cam_path, half_baseline), (right_cam_path, -hal
     set_fisheye_on_prim(stage, cam_path)
 
 # 可视化
-create_camera_visual(stage, left_cam_path, "left_cam", [50, 120, 255])
-create_camera_visual(stage, right_cam_path, "right_cam", [255, 80, 50])
+create_camera_visual(stage, left_cam_path, "left_cam", [255, 50, 50])   # 左眼=红
+create_camera_visual(stage, right_cam_path, "right_cam", [50, 80, 255])  # 右眼=蓝
 
 # 基线标识条
 bar_prim = UsdGeom.Cube.Define(stage, f"{rig_path}/baseline_bar")
