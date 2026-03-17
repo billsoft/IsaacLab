@@ -138,6 +138,71 @@ simulation_app = app_launcher.app
 import isaaclab.sim as sim_utils
 ```
 
+## NPC 人物动画（重要经验）
+
+### 骨骼系统不兼容问题
+
+Isaac Sim 官方角色有两套完全不兼容的骨骼系统：
+- **NVIDIA Biped**（81 关节）：`Root/Pelvis/L_UpLeg/...` — 仅 `biped_demo_meters.usd` 使用
+- **RL Bones / Reallusion**（101 关节）：`RL_BoneRoot/Hip/Pelvis/L_Thigh/...` — 所有纹理角色使用
+
+两套骨骼关节名 **0% 匹配**。直接用 `UsdSkel.BindingAPI` 绑定 `.skelanim.usd` 到 RL Bones 角色会静默失败 → T-pose。
+**永远不要**手动绑定 skelanim 到纹理角色。
+
+### 正确方案：IRA SimulationManager
+
+使用 `isaacsim.replicator.agent.core.simulation.SimulationManager`，它自动处理：
+- 场景加载、角色生成
+- 骨骼重定向（`omni.anim.retarget.core`）
+- 动画图驱动（`omni.anim.graph.core`）
+- NavMesh 烘焙和寻路
+- Behavior Script 挂载
+
+**必须启用的扩展**（顺序重要）：
+```python
+from isaacsim.core.utils.extensions import enable_extension
+for ext in [
+    "omni.anim.timeline", "omni.anim.graph.bundle", "omni.anim.graph.core",
+    "omni.anim.retarget.core", "omni.anim.navigation.core",
+    "omni.anim.navigation.bundle", "omni.anim.people", "omni.kit.scripting",
+]:
+    enable_extension(ext)
+```
+
+**关键流程**：
+```python
+enable_extension("isaacsim.replicator.agent.core")
+from isaacsim.replicator.agent.core.simulation import SimulationManager
+
+sim_manager = SimulationManager()
+sim_manager.load_config_file("config.yaml")  # YAML 配置
+sim_manager.set_up_simulation_from_config_file()  # 异步 setup
+await sim_manager.run_data_generation_async(will_wait_until_complete=True)  # 异步运行
+```
+
+**GoTo 命令格式**（角色行走控制）：
+```
+Character GoTo 4.0 0.0 0.0 0       # 走到 (4,0,0)，面朝 rotation=0°
+Character GoTo -4.0 0.0 0.0 180    # 走回 (-4,0,0)，面朝 180°
+Character Idle 5                     # 原地站立 5 秒
+```
+
+IRA 角色命名规则：第 0 个→`Character`，第 1 个→`Character_01`，第 10 个→`Character_10`
+
+**参考脚本**：
+- Isaac Sim 官方：`D:\code\IsaacSim\source\standalone_examples\api\isaacsim.anim.people\npc_walk_back_and_forth.py`
+- IsaacLab 移植：`scripts/npc/npc_people_demo.py`
+
+### 角色朝向约定（Z-up 场景直接操作 XformOp 时）
+
+`_new` / `F_*` / `M_*` 角色本地前向是 **+Y**（Z-up Reallusion 约定）：
+```python
+# 要让角色面朝运动方向 (dx, dy)：yaw = atan2(-dx, dy)
+yaw = np.degrees(np.arctan2(-d[0], d[1]))
+# Gf.Rotation(Gf.Vec3d(0,0,1), yaw)
+```
+`xformOp:orient` 精度为 **Quatd**（double），不是 Quatf。
+
 ## Licenses
 
 - Core code: BSD-3-Clause
