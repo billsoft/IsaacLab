@@ -154,35 +154,40 @@ def generate_npc_config_file(num_characters, command_file):
 # Helper: set fisheye lens properties on a camera prim
 # ---------------------------------------------------------------------------
 def set_fisheye_on_prim(stage, cam_prim_path):
-    """直接在 USD prim 上设置 ftheta 鱼眼属性，绕过 Camera 类。"""
+    """在 USD prim 上正确应用 ftheta 鱼眼 API schema 并设置参数。
+
+    关键：必须先 ApplyAPI 注册 schema，渲染器才会识别 ftheta 属性。
+    属性名必须用 k0-k4（不是 p0-p4），opticalCenter（不是 opticalCentreX/Y）。
+    这与 Camera.set_ftheta_properties() 内部实现一致。
+    """
     prim = stage.GetPrimAtPath(cam_prim_path)
     if not prim.IsValid():
         print(f"[Stereo] WARNING: prim {cam_prim_path} not valid, skip fisheye setup")
         return
-    # 设置 lens distortion 属性
-    attrs = {
-        "omni:lensdistortion:model": "ftheta",
-        "omni:lensdistortion:ftheta:nominalWidth": float(CAM_W),
-        "omni:lensdistortion:ftheta:nominalHeight": float(CAM_H),
-        "omni:lensdistortion:ftheta:opticalCentreX": float(cx),
-        "omni:lensdistortion:ftheta:opticalCentreY": float(cy),
-        "omni:lensdistortion:ftheta:maxFov": float(DIAG_FOV_DEG),
-        "omni:lensdistortion:ftheta:p0": 0.0,
-        "omni:lensdistortion:ftheta:p1": float(K1_EQUIDISTANT),
-        "omni:lensdistortion:ftheta:p2": 0.0,
-        "omni:lensdistortion:ftheta:p3": 0.0,
-        "omni:lensdistortion:ftheta:p4": 0.0,
-        "fStop": 0.0,
-    }
-    for attr_name, val in attrs.items():
-        attr = prim.GetAttribute(attr_name)
-        if not attr:
-            if isinstance(val, float):
-                attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Float)
-            elif isinstance(val, str):
-                attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.String)
-        if attr:
-            attr.Set(val)
+
+    # 第1步：应用 OmniLensDistortion API Schema（关键！没有这步渲染器不识别）
+    prim.ApplyAPI("OmniLensDistortionFthetaAPI")
+
+    # 第2步：设置模型类型
+    prim.GetAttribute("omni:lensdistortion:model").Set("ftheta")
+
+    # 第3步：设置 ftheta 参数（属性由 schema 定义，ApplyAPI 后自动存在）
+    prim.GetAttribute("omni:lensdistortion:ftheta:nominalWidth").Set(float(CAM_W))
+    prim.GetAttribute("omni:lensdistortion:ftheta:nominalHeight").Set(float(CAM_H))
+    prim.GetAttribute("omni:lensdistortion:ftheta:opticalCenter").Set((float(cx), float(cy)))
+    prim.GetAttribute("omni:lensdistortion:ftheta:maxFov").Set(float(DIAG_FOV_DEG))
+
+    # 第4步：等距投影畸变系数 k0-k4（不是 p0-p4！）
+    # 等距模型：theta = k0 + k1*r + k2*r^2 + k3*r^3 + k4*r^4
+    # 纯等距：k1 = 1/fx，其余为 0
+    prim.GetAttribute("omni:lensdistortion:ftheta:k0").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k1").Set(float(K1_EQUIDISTANT))
+    prim.GetAttribute("omni:lensdistortion:ftheta:k2").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k3").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k4").Set(0.0)
+
+    # 第5步：禁用景深模糊
+    prim.GetAttribute("fStop").Set(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -354,9 +359,9 @@ left_cam_path = f"{rig_path}/Left"
 right_cam_path = f"{rig_path}/Right"
 
 # 相机朝向：+X → -Z (俯拍)
-# euler (0, 90, 0) → rotation around Y by 90°
+# euler (0, 0, 90) → 使光轴从 +X 转到 -Z（向下看）
 import isaacsim.core.utils.numpy.rotations as rot_utils
-cam_euler = np.array([0.0, 90.0, 0.0])
+cam_euler = np.array([0.0, 0.0, 90.0])
 cam_quat = rot_utils.euler_angles_to_quats(cam_euler, degrees=True)  # [w, x, y, z]
 
 for cam_path, y_offset in [(left_cam_path, half_baseline), (right_cam_path, -half_baseline)]:
