@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 parser = argparse.ArgumentParser(description="Stereo fisheye camera + NPC data generation")
 parser.add_argument("--headless", action="store_true", help="Run without GUI")
 parser.add_argument("--num_frames", type=int, default=50, help="Number of frame pairs to capture (headless mode)")
-parser.add_argument("--camera_height", type=float, default=2.5, help="Camera height (m)")
+parser.add_argument("--camera_height", type=float, default=3.0, help="Camera height (m)")
 parser.add_argument("--num_characters", type=int, default=3, help="Number of NPC characters")
 parser.add_argument("--walk_distance", type=float, default=8.0, help="NPC walk distance (m)")
 parser.add_argument("--capture_interval", type=int, default=3, help="Capture every N simulation steps")
