@@ -2,6 +2,40 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⚠️ 最高优先级规则：Python 环境限制
+
+**🔴 严禁使用本地系统 Python！必须使用 Isaac Sim 内置 Python**
+
+本项目运行在 **Windows Isaac Lab** 环境，唯一可用的 Python 解释器路径：
+```
+D:\code\IsaacLab\_isaac_sim\python.bat
+```
+
+### 🚫 绝对禁止的操作
+- ❌ `python script.py` - 使用系统 Python
+- ❌ `pip install package` - 使用系统 pip  
+- ❌ `conda activate` - 使用 conda 环境
+- ❌ 在 CMD/PowerShell 中直接运行 Python 脚本
+
+### ✅ 唯一正确的操作方式
+```bat
+# 运行脚本
+isaaclab.bat -p <脚本路径>
+
+# 安装包
+isaaclab.bat -p -m pip install <包名>
+
+# 直接使用 Isaac Sim Python
+D:\code\IsaacLab\_isaac_sim\python.bat <脚本路径>
+D:\code\IsaacLab\_isaac_sim\python.bat -m pip install <包名>
+
+# 检查包
+isaaclab.bat -p -m pip list
+```
+
+### 📋 原因说明
+Isaac Sim 的 C++ 扩展模块与内置 Python 3.11.13 紧密绑定，使用其他 Python 环境会导致 DLL 加载失败和运行时错误。
+
 ## 沟通语言
 
 **始终用中文（简体中文）与用户沟通。** 所有回复、解释、问题均使用中文。
@@ -11,14 +45,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Isaac Lab is a GPU-accelerated robotics simulation framework built on NVIDIA Isaac Sim. It supports reinforcement learning, imitation learning, and motion planning with sim-to-real transfer. Requires Isaac Sim 4.5/5.0/5.1 installed separately.
 
-## Python 环境（重要）
+## Python 环境说明（重复强调）
 
-本项目运行在 **Windows Isaac Lab 路线 A** 环境，Python 解释器为 Isaac Sim 内置版本：
+**再次强调：本项目只能使用 Isaac Sim 内置 Python**
 ```
 D:\code\IsaacLab\_isaac_sim\python.bat
 ```
-
-**绝对不要**使用系统 Python、conda 或裸 `pip` 命令。
 
 ### 安装包
 ```bat
