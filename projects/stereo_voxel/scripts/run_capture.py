@@ -26,10 +26,11 @@ with open(LOG, "w") as log:
     log.write(f"CMD: {ISAAC_PYTHON} {SCRIPT} {' '.join(args)}\n")
     log.flush()
     proc = subprocess.Popen(
-        [ISAAC_PYTHON, SCRIPT] + args,
+        [ISAAC_PYTHON, "-u", SCRIPT] + args,
         stdout=log,
         stderr=subprocess.STDOUT,
         cwd=r"D:\code\IsaacLab",
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     proc.wait()
     log.write(f"\nEXIT CODE: {proc.returncode}\n")

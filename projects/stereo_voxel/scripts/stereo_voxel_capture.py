@@ -20,6 +20,14 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
+# 强制 print 立即刷新，防止 subprocess 重定向时输出丢失
+import builtins
+_original_print = builtins.print
+def _flush_print(*a, **kw):
+    kw.setdefault("flush", True)
+    _original_print(*a, **kw)
+builtins.print = _flush_print
+
 parser = argparse.ArgumentParser(description="Stereo fisheye + voxel GT capture")
 parser.add_argument("--headless", action="store_true", help="Run without GUI")
 parser.add_argument("--num_frames", type=int, default=200, help="Number of frames to capture (headless)")
@@ -469,6 +477,14 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi, meters_to_
     # 将世界坐标从米转为 stage 单位（PhysX 的工作单位）
     world_centers_stage = (world_centers_flat * meters_to_stage).reshape(NX, NY, NZ, 3)
 
+    # 修复地面层边界效应：z=Z_GROUND_INDEX 的体素中心在 z=+0.05m，
+    # fine_half=0.05m → PhysX box 下边界恰好在 z=0（地面平面），
+    # 导致碰撞检测不稳定，约 50% 的地面体素 miss。
+    # 解决：将地面层 z 坐标下移 2mm，确保 box 与地面明确重叠。
+    Z_GI = voxel_grid.Z_GROUND_INDEX
+    GROUND_Z_NUDGE = 0.002 * meters_to_stage  # 2mm in stage units
+    world_centers_stage[:, :, Z_GI, 2] -= GROUND_Z_NUDGE
+
     COARSE = 5  # 粗查块大小
     # half extent 也需要换算为 stage 单位
     fine_half = (VOXEL_SIZE / 2.0) * meters_to_stage
@@ -542,6 +558,20 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi, meters_to_
                                 voxel_grid.semantic[i, j, k] = class_id
                                 voxel_grid.instance[i, j, k] = get_instance_id(hit_path)
                                 occupied_count += 1
+
+    # 后处理：地面层兜底填充
+    # 如果 z=Z_GI 是 free 但 z=Z_GI-1（地下层）是 occupied，说明边界检测 miss，
+    # 用地下层的类别填充地面层。
+    from semantic_classes import OTHER_GROUND
+    if Z_GI > 0:
+        underground = voxel_grid.semantic[:, :, Z_GI - 1]
+        ground = voxel_grid.semantic[:, :, Z_GI]
+        miss_mask = (ground == FREE) & (underground > 0) & (underground != UNOBSERVED)
+        patched = int(miss_mask.sum())
+        if patched > 0:
+            voxel_grid.semantic[:, :, Z_GI][miss_mask] = OTHER_GROUND
+            occupied_count += patched
+            print(f"    Ground layer patch: filled {patched} missing ground voxels (z={Z_GI})")
 
     free_count = np.sum(voxel_grid.semantic == FREE)
     unobs_count = np.sum(voxel_grid.semantic == UNOBSERVED)
@@ -691,14 +721,13 @@ for prefix, info in scene_info.items():
           f"Y=[{info['bbox_min'][1]:.1f}, {info['bbox_max'][1]:.1f}]m, "
           f"Z=[{info['bbox_min'][2]:.1f}, {info['bbox_max'][2]:.1f}]m")
 
-# 如果用户没有指定相机位置 (默认 0,0) 且场景探测到了物体，自动定位
+# 相机位置：默认 (0, 0)，与 test_stereo_pair.py 一致
+# 仅在用户显式传入 --camera_x/--camera_y 时才覆盖
 cam_x = args.camera_x
 cam_y = args.camera_y
-if cam_x == 0.0 and cam_y == 0.0 and scene_info:
+if scene_info:
     suggested_x, suggested_y = suggest_camera_position(scene_info)
-    print(f"[Probe] Auto-position: ({suggested_x:.1f}, {suggested_y:.1f})m (median of shelves)")
-    cam_x = suggested_x
-    cam_y = suggested_y
+    print(f"[Probe] Suggested position: ({suggested_x:.1f}, {suggested_y:.1f})m (use --camera_x/--camera_y to override)")
 
 # StereoRig Xform
 height_m = args.camera_height
@@ -969,49 +998,37 @@ if args.headless:
     print(f"[Capture] Headless done: {captured} frames captured.")
 
 else:
-    # === GUI 模式 ===
-    recording = False
-    was_playing = False
-
+    # === GUI 模式（自动 play，不需要手动点）===
     print("\n" + "=" * 60)
-    print("[Capture] GUI mode")
+    print("[Capture] GUI mode (auto-play)")
     print(f"  - StereoRig: /World/StereoRig (draggable)")
-    print(f"  - Camera: {height_m}m height, {BASELINE_M*1000:.0f}mm baseline")
+    print(f"  - Camera: ({cam_x:.1f}, {cam_y:.1f}, {height_m})m, {BASELINE_M*1000:.0f}mm baseline")
     if npc_ready:
         print(f"  - {num_chars} NPC(s) ready")
     print(f"  - Capture every {args.capture_interval} steps with timeline freeze")
+    print(f"  - Target: {args.num_frames} frames")
     print(f"  - Output: {OUTPUT_DIR}")
-    print("  - Play to start | Stop to pause")
     print("=" * 60 + "\n")
+
+    timeline.play()
+
+    for _ in range(warmup_steps):
+        simulation_app.update()
+
+    captured = 0
+    sim_step = 0
 
     while simulation_app.is_running():
         simulation_app.update()
-
-        is_playing = timeline.is_playing()
-
-        if is_playing and not was_playing:
-            recording = True
-            sim_step = 0
-            print(f"[Capture] Recording started (frame_id={frame_id})")
-
-        if not is_playing and was_playing:
-            recording = False
-            wait_pending_saves()
-            print(f"[Capture] Recording paused (captured to frame_id={frame_id})")
-
-        was_playing = is_playing
-
-        if not recording:
-            continue
-
         sim_step += 1
 
-        if sim_step <= warmup_steps:
-            continue
+        if captured >= args.num_frames:
+            continue  # 达标后仍保持 GUI 运行，但不再采集
 
         if sim_step % args.capture_interval == 0:
-            capture_frame(frame_id)
-            frame_id += 1
+            if capture_frame(frame_id):
+                frame_id += 1
+                captured += 1
 
 # ============================================================================
 # 收尾
