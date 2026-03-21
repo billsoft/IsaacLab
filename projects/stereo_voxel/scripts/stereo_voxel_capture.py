@@ -53,6 +53,154 @@ if SCRIPT_DIR not in sys.path:
 from semantic_classes import FREE, GENERAL_OBJECT, PERSON, UNOBSERVED, lookup_class_id
 from voxel_grid import VoxelGrid
 
+
+# ===========================================================================
+# 场景探测：扫描关键物体位置，自动推荐相机位置
+# ===========================================================================
+def probe_scene_objects(stage, stage_mpu, keywords=("RackFrame", "RackShelf", "PillarA")):
+    """扫描场景中名称包含关键词的顶层 Xform prim，返回世界坐标范围（米）。
+
+    只匹配 /Root/ 下的直接子 prim（避免遍历过深）。
+
+    Returns:
+        dict: {keyword: {"positions": np.array (N,3) in meters, "bbox_min": (3,), "bbox_max": (3,)}}
+    """
+    from pxr import UsdGeom as _UsdGeom
+    results = {k: [] for k in keywords}
+    root = stage.GetPrimAtPath("/Root")
+    if not root.IsValid():
+        return results
+    for child in root.GetChildren():
+        name = child.GetName()
+        for kw in keywords:
+            if kw in name:
+                xformable = _UsdGeom.Xformable(child)
+                try:
+                    xf = xformable.ComputeLocalToWorldTransform(0)
+                    pos = xf.ExtractTranslation()
+                    results[kw].append([pos[0] * stage_mpu, pos[1] * stage_mpu, pos[2] * stage_mpu])
+                except Exception:
+                    pass
+                break
+    out = {}
+    for kw, positions in results.items():
+        if positions:
+            arr = np.array(positions)
+            out[kw] = {
+                "positions": arr,
+                "bbox_min": arr.min(axis=0),
+                "bbox_max": arr.max(axis=0),
+                "count": len(arr),
+            }
+    return out
+
+
+def suggest_camera_position(scene_info):
+    """根据场景物体分布，推荐相机 XY 位置（米）。
+
+    策略：找货架区域中心的通道位置。
+    """
+    all_positions = []
+    for info in scene_info.values():
+        all_positions.append(info["positions"][:, :2])  # XY only
+    if not all_positions:
+        return 0.0, 0.0
+    all_xy = np.vstack(all_positions)
+    # 货架中心
+    center_x = float(np.median(all_xy[:, 0]))
+    center_y = float(np.median(all_xy[:, 1]))
+    return center_x, center_y
+
+
+# ===========================================================================
+# NPC Xform 检测：用 USD 变换替代 PhysX 检测人物
+# ===========================================================================
+NPC_RADIUS_M = 0.25     # 人体近似半径（米）
+NPC_HEIGHT_M = 1.8       # 人体近似高度（米）
+
+
+def get_npc_world_positions(stage, stage_mpu):
+    """获取场景中所有 NPC Character 的世界位置（米）。
+
+    扫描 /World/Characters/Character* 下的 SkelRoot。
+
+    Returns:
+        list of np.array (3,): 每个 NPC 脚底世界坐标 [x, y, z]
+    """
+    from pxr import UsdGeom as _UsdGeom
+    npc_positions = []
+    chars_prim = stage.GetPrimAtPath("/World/Characters")
+    if not chars_prim.IsValid():
+        return npc_positions
+
+    for child in chars_prim.GetChildren():
+        name = child.GetName()
+        if not name.startswith("Character"):
+            continue
+        xformable = _UsdGeom.Xformable(child)
+        try:
+            xf = xformable.ComputeLocalToWorldTransform(0)
+            pos = xf.ExtractTranslation()
+            npc_positions.append(np.array([
+                pos[0] * stage_mpu,
+                pos[1] * stage_mpu,
+                pos[2] * stage_mpu,
+            ]))
+        except Exception:
+            continue
+    return npc_positions
+
+
+def stamp_npc_voxels(voxel_grid, cam_pos, cam_yaw, npc_world_positions):
+    """将 NPC 世界坐标投影到体素网格，标记为 PERSON。
+
+    用圆柱近似：半径 NPC_RADIUS_M, 高度 NPC_HEIGHT_M。
+    """
+    if not npc_world_positions:
+        return 0
+
+    count = 0
+    for npc_pos in npc_world_positions:
+        # 世界坐标 → 体素局部坐标
+        ground_proj = np.array([cam_pos[0], cam_pos[1], 0.0])
+        local = npc_pos - ground_proj
+
+        # 逆旋转（如果有 yaw）
+        if abs(cam_yaw) > 1e-6:
+            cos_y, sin_y = np.cos(-cam_yaw), np.sin(-cam_yaw)
+            lx = local[0] * cos_y - local[1] * sin_y
+            ly = local[0] * sin_y + local[1] * cos_y
+            local[0], local[1] = lx, ly
+
+        # 体素索引范围
+        vx_min = int(np.floor((local[0] - NPC_RADIUS_M) / voxel_grid.VOXEL_SIZE + voxel_grid.CENTER_X))
+        vx_max = int(np.ceil((local[0] + NPC_RADIUS_M) / voxel_grid.VOXEL_SIZE + voxel_grid.CENTER_X))
+        vy_min = int(np.floor((local[1] - NPC_RADIUS_M) / voxel_grid.VOXEL_SIZE + voxel_grid.CENTER_Y))
+        vy_max = int(np.ceil((local[1] + NPC_RADIUS_M) / voxel_grid.VOXEL_SIZE + voxel_grid.CENTER_Y))
+        vz_min = int(np.floor(local[2] / voxel_grid.VOXEL_SIZE + voxel_grid.Z_GROUND_INDEX))
+        vz_max = int(np.ceil((local[2] + NPC_HEIGHT_M) / voxel_grid.VOXEL_SIZE + voxel_grid.Z_GROUND_INDEX))
+
+        # 裁剪到网格边界
+        vx_min = max(0, vx_min)
+        vx_max = min(voxel_grid.NX, vx_max)
+        vy_min = max(0, vy_min)
+        vy_max = min(voxel_grid.NY, vy_max)
+        vz_min = max(0, vz_min)
+        vz_max = min(voxel_grid.NZ, vz_max)
+
+        for i in range(vx_min, vx_max):
+            for j in range(vy_min, vy_max):
+                # 检查是否在圆柱半径内
+                cx = (i - voxel_grid.CENTER_X + 0.5) * voxel_grid.VOXEL_SIZE
+                cy = (j - voxel_grid.CENTER_Y + 0.5) * voxel_grid.VOXEL_SIZE
+                dist_sq = (cx - local[0])**2 + (cy - local[1])**2
+                if dist_sq <= NPC_RADIUS_M**2:
+                    for k in range(vz_min, vz_max):
+                        voxel_grid.semantic[i, j, k] = PERSON
+                        count += 1
+
+    return count
+
 # ===========================================================================
 # SC132GS 相机参数
 # ===========================================================================
@@ -247,9 +395,9 @@ def get_object_type_from_prim_path(stage, prim_path: str) -> str:
     current = prim
     while current.IsValid():
         name = current.GetName()
-        # 跳过内部细节（Collider, Mesh, Shape 等）
+        # 跳过内部细节（Collider, Mesh, Shape, Section 等）
         if name in ("Collider", "CollisionMesh", "CollisionPlane", "Mesh",
-                     "Shape", "Physics", "Collision", "collision"):
+                     "Shape", "Physics", "Collision", "collision") or name.startswith("Section"):
             current = current.GetParent()
             continue
         # 跳过根和 World 节点
@@ -266,6 +414,25 @@ def get_object_type_from_prim_path(stage, prim_path: str) -> str:
     return prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
 
 
+def _clean_object_name(raw_name: str) -> str:
+    """清理物体名：去掉 SM_/S_ 前缀和尾部 _数字 后缀。
+
+    SM_RackShelf_01 → RackShelf
+    SM_CardBoxD_04  → CardBoxD
+    S_TrafficCone   → TrafficCone
+    """
+    name = raw_name
+    # 去前缀
+    for prefix in ("SM_", "S_"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    # 去尾部 _数字
+    import re
+    name = re.sub(r"_\d+$", "", name)
+    return name
+
+
 # Instance ID 管理
 _instance_map = {}  # prim_path → instance_id
 _next_instance_id = 1
@@ -279,26 +446,32 @@ def get_instance_id(prim_path: str) -> int:
     return _instance_map[prim_path]
 
 
-def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
+def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi, meters_to_stage):
     """用 PhysX overlap_box 填充体素网格。
 
     采用粗查+细查两阶段策略：
       1. 粗查：5x5x5 体素块(0.5m³)做一次 overlap，无 hit 则整块标 FREE
       2. 细查：有 hit 的块内逐个体素查询
 
+    关键：PhysX 在 stage 单位（通常是厘米）下工作，
+         体素世界坐标是米单位，传入 PhysX 前必须乘以 meters_to_stage。
+
     Args:
         stage: USD stage
         voxel_grid: VoxelGrid 实例（会被修改）
-        world_centers_flat: (N, 3) 世界坐标
+        world_centers_flat: (N, 3) 世界坐标（米）
         physx_sqi: PhysX scene query interface
+        meters_to_stage: float, 米→stage 单位的换算系数（= 1/metersPerUnit）
     """
     NX, NY, NZ = voxel_grid.NX, voxel_grid.NY, voxel_grid.NZ
     VOXEL_SIZE = voxel_grid.VOXEL_SIZE
-    world_centers = world_centers_flat.reshape(NX, NY, NZ, 3)
+
+    # 将世界坐标从米转为 stage 单位（PhysX 的工作单位）
+    world_centers_stage = (world_centers_flat * meters_to_stage).reshape(NX, NY, NZ, 3)
 
     COARSE = 5  # 粗查块大小
-    coarse_half = COARSE * VOXEL_SIZE / 2.0  # 0.25m
-    fine_half = VOXEL_SIZE / 2.0  # 0.05m
+    # half extent 也需要换算为 stage 单位
+    fine_half = (VOXEL_SIZE / 2.0) * meters_to_stage
     identity_rot = carb.Float4(0.0, 0.0, 0.0, 1.0)
 
     total_voxels = NX * NY * NZ
@@ -309,16 +482,15 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
     for ci in range(0, NX, COARSE):
         for cj in range(0, NY, COARSE):
             for ck in range(0, NZ, COARSE):
-                # 粗查块的世界中心
                 ei = min(ci + COARSE, NX)
                 ej = min(cj + COARSE, NY)
                 ek = min(ck + COARSE, NZ)
-                block_center = world_centers[ci:ei, cj:ej, ck:ek].mean(axis=(0, 1, 2))
+                block_center = world_centers_stage[ci:ei, cj:ej, ck:ek].mean(axis=(0, 1, 2))
 
-                # 粗查 half extent（适配边界块可能不足 5x5x5）
-                bh_x = (ei - ci) * VOXEL_SIZE / 2.0
-                bh_y = (ej - cj) * VOXEL_SIZE / 2.0
-                bh_z = (ek - ck) * VOXEL_SIZE / 2.0
+                # 粗查 half extent（stage 单位）
+                bh_x = (ei - ci) * VOXEL_SIZE * meters_to_stage / 2.0
+                bh_y = (ej - cj) * VOXEL_SIZE * meters_to_stage / 2.0
+                bh_z = (ek - ck) * VOXEL_SIZE * meters_to_stage / 2.0
 
                 # 粗查
                 coarse_hits = []
@@ -336,7 +508,6 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
                 )
 
                 if not coarse_hits:
-                    # 整块标 FREE
                     voxel_grid.semantic[ci:ei, cj:ej, ck:ek] = FREE
                     coarse_skipped += (ei - ci) * (ej - cj) * (ek - ck)
                     continue
@@ -345,7 +516,7 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
                 for i in range(ci, ei):
                     for j in range(cj, ej):
                         for k in range(ck, ek):
-                            center = world_centers[i, j, k]
+                            center = world_centers_stage[i, j, k]
                             fine_hits = []
 
                             def on_fine_hit(hit):
@@ -364,10 +535,10 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
                                 voxel_grid.semantic[i, j, k] = FREE
                                 voxel_grid.instance[i, j, k] = 0
                             else:
-                                # 取第一个 hit 的物体类型
                                 hit_path = fine_hits[0]
                                 obj_type = get_object_type_from_prim_path(stage, hit_path)
-                                class_id = lookup_class_id(obj_type)
+                                clean_name = _clean_object_name(obj_type)
+                                class_id = lookup_class_id(clean_name)
                                 voxel_grid.semantic[i, j, k] = class_id
                                 voxel_grid.instance[i, j, k] = get_instance_id(hit_path)
                                 occupied_count += 1
@@ -376,6 +547,18 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi):
     unobs_count = np.sum(voxel_grid.semantic == UNOBSERVED)
     print(f"    Voxel fill: {occupied_count} occupied, {free_count} free, "
           f"{unobs_count} unobserved, {coarse_skipped} coarse-skipped")
+
+    # 诊断：打印检测到的唯一 prim paths 和对应类别
+    unique_paths = set()
+    for path, iid in _instance_map.items():
+        unique_paths.add(path)
+    if unique_paths:
+        print(f"    Detected {len(unique_paths)} unique collision prims:")
+        for p in sorted(unique_paths):
+            obj_type = get_object_type_from_prim_path(stage, p)
+            clean_name = _clean_object_name(obj_type)
+            cid = lookup_class_id(clean_name)
+            print(f"      [{cid:2d}] {clean_name:<25s} (raw={obj_type}) ← {p}")
 
 
 # ============================================================================
@@ -489,7 +672,7 @@ else:
         simulation_app.update()
 
 # ============================================================================
-# PHASE 2: 创建双目相机
+# PHASE 2: 场景探测 + 创建双目相机
 # ============================================================================
 print("[Capture] Creating stereo cameras...")
 stage = omni.usd.get_context().get_stage()
@@ -500,13 +683,30 @@ stage_mpu = UsdGeom.GetStageMetersPerUnit(stage)
 stage_scale = 1.0 / stage_mpu
 print(f"[Capture] Stage metersPerUnit={stage_mpu}, scale={stage_scale}")
 
+# --- 场景探测：扫描货架位置，自动推荐相机坐标 ---
+scene_info = probe_scene_objects(stage, stage_mpu)
+for prefix, info in scene_info.items():
+    print(f"[Probe] {prefix}: {info['count']} prims, "
+          f"X=[{info['bbox_min'][0]:.1f}, {info['bbox_max'][0]:.1f}]m, "
+          f"Y=[{info['bbox_min'][1]:.1f}, {info['bbox_max'][1]:.1f}]m, "
+          f"Z=[{info['bbox_min'][2]:.1f}, {info['bbox_max'][2]:.1f}]m")
+
+# 如果用户没有指定相机位置 (默认 0,0) 且场景探测到了物体，自动定位
+cam_x = args.camera_x
+cam_y = args.camera_y
+if cam_x == 0.0 and cam_y == 0.0 and scene_info:
+    suggested_x, suggested_y = suggest_camera_position(scene_info)
+    print(f"[Probe] Auto-position: ({suggested_x:.1f}, {suggested_y:.1f})m (median of shelves)")
+    cam_x = suggested_x
+    cam_y = suggested_y
+
 # StereoRig Xform
 height_m = args.camera_height
 rig_path = "/World/StereoRig"
 rig_xform = UsdGeom.Xform.Define(stage, rig_path)
 rig_pos = Gf.Vec3d(
-    float(args.camera_x * stage_scale),
-    float(args.camera_y * stage_scale),
+    float(cam_x * stage_scale),
+    float(cam_y * stage_scale),
     float(height_m * stage_scale),
 )
 rig_xform.AddTranslateOp().Set(rig_pos)
@@ -543,7 +743,7 @@ bar_prim.GetDisplayColorAttr().Set([Gf.Vec3f(0.8, 0.8, 0.2)])
 for _ in range(5):
     simulation_app.update()
 
-print(f"[Capture] StereoRig at ({args.camera_x}, {args.camera_y}, {height_m})m, baseline={BASELINE_M*1000:.0f}mm")
+print(f"[Capture] StereoRig at ({cam_x:.1f}, {cam_y:.1f}, {height_m})m, baseline={BASELINE_M*1000:.0f}mm")
 
 # ============================================================================
 # PHASE 3: Replicator annotators + 体素系统初始化
@@ -693,10 +893,14 @@ def capture_frame(frame_id):
     # 4. 读取相机世界位姿
     cam_pos, cam_yaw = get_rig_world_pose(stage, rig_path)
 
-    # 5. 体素填充
+    # 5. 体素填充（注意：PhysX 在 stage 单位下工作，需要 meters→stage 换算）
     vg = VoxelGrid()
     world_centers_flat = vg.get_world_centers_flat(cam_pos, cam_yaw)
-    fill_voxel_grid(stage, vg, world_centers_flat, physx_sqi)
+    fill_voxel_grid(stage, vg, world_centers_flat, physx_sqi, stage_scale)
+
+    # 5b. NPC 人物检测（IRA 动画角色无 PhysX 碰撞体，用 USD Xform 补充）
+    npc_positions = get_npc_world_positions(stage, stage_mpu)
+    npc_voxel_count = stamp_npc_voxels(vg, cam_pos, cam_yaw, npc_positions)
 
     # 6. 异步保存
     frame_str = f"frame_{frame_id:06d}"
@@ -720,8 +924,10 @@ def capture_frame(frame_id):
 
     if frame_id % 5 == 0:
         occ = int(np.sum((vg.semantic > 0) & (vg.semantic < UNOBSERVED)))
+        person_ct = int(np.sum(vg.semantic == PERSON))
         print(f"  Frame {frame_id}: L_mean={rgb_l.mean():.1f}, R_mean={rgb_r.mean():.1f}, "
-              f"occupied={occ}, pos=({cam_pos[0]:.1f},{cam_pos[1]:.1f},{cam_pos[2]:.1f})")
+              f"occupied={occ}, person={person_ct}, npc_pos={len(npc_positions)}, "
+              f"pos=({cam_pos[0]:.1f},{cam_pos[1]:.1f},{cam_pos[2]:.1f})")
 
     # 7. 恢复世界
     timeline.play()

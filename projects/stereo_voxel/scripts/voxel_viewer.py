@@ -81,6 +81,7 @@ def load_voxels_json(data_dir, fid):
             stats[str(cid)] = c
     stats["255"] = int(np.sum(sem == UNOBSERVED))
     stats["total"] = int(sem.size)
+    stats["occupied"] = int(np.sum(mask))
     return {"voxels": voxels, "stats": stats}
 
 
@@ -190,6 +191,8 @@ canvas{display:block;width:100%;height:100%}
     <img id="imgL" alt="left">
     <h3>Right Eye</h3>
     <img id="imgR" alt="right">
+    <h3>Meta</h3>
+    <div class="stats" id="metaBox" style="font-size:10px;color:var(--dim)"></div>
     <h3>Statistics</h3>
     <div class="stats" id="statsBox"></div>
   </div>
@@ -208,7 +211,9 @@ canvas{display:block;width:100%;height:100%}
 <script>
 const CI=__CLASS_JSON__;
 const VS=0.1,NX=72,NY=60,NZ=32,CX=36,CY=30,ZG=7;
-let frames=[],ci=0,hidden=new Set(),curVox=[],mesh=null;
+const GROUND_IDS=new Set([9,10,11,12]);
+const STRUCT_IDS=new Set([13,14,15,16]);
+let frames=[],ci=0,hidden=new Set(),curVox=[],mesh=null,curMeta=null,camMk=null;
 
 /* === Three.js === */
 const cvs=document.getElementById('c');
@@ -219,11 +224,11 @@ const sc=new THREE.Scene();
 const cam=new THREE.PerspectiveCamera(45,1,0.05,200);
 cam.position.set(6,5,5);
 const ctrl=new THREE.OrbitControls(cam,cvs);
-ctrl.enableDamping=true; ctrl.dampingFactor=0.1; ctrl.target.set(0,1,0);
+ctrl.enableDamping=true; ctrl.dampingFactor=0.05; ctrl.target.set(0,0.5,0);
 
-sc.add(new THREE.AmbientLight(0x8899bb,0.5));
-const d1=new THREE.DirectionalLight(0xffffff,0.9); d1.position.set(8,12,6); sc.add(d1);
-const d2=new THREE.DirectionalLight(0x4466aa,0.3); d2.position.set(-4,6,-8); sc.add(d2);
+sc.add(new THREE.AmbientLight(0xffffff,0.6));
+const d1=new THREE.DirectionalLight(0xffffff,0.8); d1.position.set(50,50,100); sc.add(d1);
+const d2=new THREE.DirectionalLight(0xffffff,0.3); d2.position.set(-30,20,-50); sc.add(d2);
 sc.add(new THREE.GridHelper(8,40,0x334155,0x1f2937));
 
 // bounding wireframe
@@ -238,6 +243,37 @@ sc.add(new THREE.GridHelper(8,40,0x334155,0x1f2937));
 const ax=new THREE.AxesHelper(0.8);
 ax.position.set(-NX*VS/2,-ZG*VS,-NY*VS/2); sc.add(ax);
 
+// camera marker (cone pointing down)
+function mkCamMarker(){
+  const g=new THREE.ConeGeometry(0.15,0.3,8);
+  const m=new THREE.MeshPhongMaterial({color:0x00ffff,transparent:true,opacity:0.85});
+  const mk=new THREE.Mesh(g,m);
+  mk.rotation.x=Math.PI; // point down
+  mk.visible=false;
+  sc.add(mk);
+  // FOV circle on ground
+  const cg=new THREE.RingGeometry(0.8,0.85,32);
+  const cm=new THREE.MeshBasicMaterial({color:0x00ffff,transparent:true,opacity:0.3,side:THREE.DoubleSide});
+  const cr=new THREE.Mesh(cg,cm);
+  cr.rotation.x=-Math.PI/2;
+  cr.visible=false;
+  sc.add(cr);
+  return {cone:mk,ring:cr};
+}
+camMk=mkCamMarker();
+
+function updateCamMarker(meta){
+  if(!meta||!meta.camera_pos){camMk.cone.visible=false;camMk.ring.visible=false;return;}
+  // camera_pos is world coords; voxel_origin_world is the grid center at ground
+  // In Three.js: x=voxel_x, y=voxel_z(up), z=voxel_y
+  // Camera is at grid center (0,0) in voxel coords, at height camera_height_m
+  const h=meta.camera_height_m||3.0;
+  camMk.cone.position.set(0,(h-ZG*VS),0);
+  camMk.cone.visible=true;
+  camMk.ring.position.set(0,-ZG*VS+0.01,0);
+  camMk.ring.visible=true;
+}
+
 /* === Voxel rendering === */
 const boxG=new THREE.BoxGeometry(VS*0.9,VS*0.9,VS*0.9);
 
@@ -249,7 +285,7 @@ function rebuild(){
   if(mesh){sc.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();mesh=null;}
   const vis=curVox.filter(v=>!hidden.has(v[3]));
   if(!vis.length){hud(0);return;}
-  const mat=new THREE.MeshLambertMaterial({vertexColors:true});
+  const mat=new THREE.MeshLambertMaterial({color:0xffffff});
   const im=new THREE.InstancedMesh(boxG,mat,vis.length);
   const dm=new THREE.Object3D(), cl=new THREE.Color();
   for(let n=0;n<vis.length;n++){
@@ -273,6 +309,12 @@ function hud(n){
 /* === Legend === */
 function mkLeg(){
   let h='<h4>Semantic Classes</h4>';
+  h+='<div style="margin:3px 0 5px;display:flex;gap:4px;flex-wrap:wrap">';
+  h+='<button onclick="fAll()" style="font-size:10px;padding:2px 6px;cursor:pointer;background:#374151;color:#e5e7eb;border:1px solid #555;border-radius:3px">All</button>';
+  h+='<button onclick="fNoGnd()" style="font-size:10px;padding:2px 6px;cursor:pointer;background:#374151;color:#e5e7eb;border:1px solid #555;border-radius:3px">Hide Ground</button>';
+  h+='<button onclick="fStruct()" style="font-size:10px;padding:2px 6px;cursor:pointer;background:#374151;color:#e5e7eb;border:1px solid #555;border-radius:3px">Struct Only</button>';
+  h+='<button onclick="fObj()" style="font-size:10px;padding:2px 6px;cursor:pointer;background:#374151;color:#e5e7eb;border:1px solid #555;border-radius:3px">Objects Only</button>';
+  h+='</div>';
   for(let c=0;c<18;c++){
     const i=CI[c]; if(!i)continue;
     const[r,g,b]=i.rgb;
@@ -281,6 +323,10 @@ function mkLeg(){
   document.getElementById('legend').innerHTML=h;
 }
 function tog(c){hidden.has(c)?hidden.delete(c):hidden.add(c);mkLeg();rebuild();}
+function fAll(){hidden.clear();mkLeg();rebuild();}
+function fNoGnd(){hidden.clear();GROUND_IDS.forEach(c=>hidden.add(c));mkLeg();rebuild();}
+function fStruct(){hidden.clear();for(let c=0;c<18;c++){if(!STRUCT_IDS.has(c))hidden.add(c);}mkLeg();rebuild();}
+function fObj(){hidden.clear();for(let c=0;c<18;c++){if(c!==17&&c!==6)hidden.add(c);}mkLeg();rebuild();}
 
 /* === Data fetch === */
 async function init(){
@@ -312,13 +358,36 @@ async function loadFrame(idx){
   try{
     const d=await(await fetch('/api/voxel/'+fid)).json();
     curVox=d.voxels||[];
+    curMeta=d.meta||null;
     rebuild();
     fillStats(d.stats||{});
+    fillMeta(curMeta,d.stats||{});
+    updateCamMarker(curMeta);
     document.getElementById('ld').style.display='none';
   }catch(e){
     document.getElementById('ld').textContent='Error: '+e.message;
     console.error(e);
   }
+}
+
+function fillMeta(meta,st){
+  const el=document.getElementById('metaBox');
+  if(!meta||!Object.keys(meta).length){el.innerHTML='<span>No meta</span>';return;}
+  let h='';
+  if(meta.camera_pos){
+    const p=meta.camera_pos;
+    h+='<div>Cam: ('+p[0].toFixed(2)+', '+p[1].toFixed(2)+', '+p[2].toFixed(2)+')</div>';
+  }
+  if(meta.voxel_origin_world){
+    const o=meta.voxel_origin_world;
+    h+='<div>Origin: ('+o[0].toFixed(2)+', '+o[1].toFixed(2)+', '+o[2].toFixed(2)+')</div>';
+  }
+  h+='<div>Grid: '+NX+'×'+NY+'×'+NZ+' @ '+VS+'m = '+(NX*NY*NZ).toLocaleString()+'</div>';
+  if(st.occupied!==undefined){
+    const pct=(st.occupied/(st.total||1)*100).toFixed(1);
+    h+='<div>Occupied: <b style="color:var(--accent)">'+st.occupied.toLocaleString()+'</b> ('+pct+'%)</div>';
+  }
+  el.innerHTML=h;
 }
 
 function fillStats(st){
