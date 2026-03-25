@@ -275,14 +275,19 @@ camera.set_ftheta_properties(
 prim.ApplyAPI("OmniLensDistortionFthetaAPI")
 prim.GetAttribute("omni:lensdistortion:model").Set("ftheta")
 
-# 属性名必须用 k0-k4（不是 p0-p4！）
+# 属性名必须用 k0-k4（不是 p0-p4！早期文档和某些示例用 p0-p4 是错的）
 prim.GetAttribute("omni:lensdistortion:ftheta:k0").Set(0.0)
 prim.GetAttribute("omni:lensdistortion:ftheta:k1").Set(float(K1_EQUIDISTANT))
-# ...
+prim.GetAttribute("omni:lensdistortion:ftheta:k2").Set(0.0)
+prim.GetAttribute("omni:lensdistortion:ftheta:k3").Set(0.0)
+prim.GetAttribute("omni:lensdistortion:ftheta:k4").Set(0.0)
 
 # opticalCenter 是元组（不是分开的 opticalCentreX/Y！）
 prim.GetAttribute("omni:lensdistortion:ftheta:opticalCenter").Set((cx, cy))
 prim.GetAttribute("omni:lensdistortion:ftheta:maxFov").Set(157.2)
+
+# fStop=0 禁用景深模糊（重要：不设置会导致远处模糊）
+prim.GetAttribute("fStop").Set(0.0)
 ```
 
 ### f-theta 多项式公式
@@ -371,29 +376,21 @@ xf.AddOrientOp().Set(Gf.Quatf(float(cam_quat[0]),
 # 直接在 USD prim 上设置 ftheta 鱼眼属性
 def set_fisheye_on_prim(stage, cam_prim_path):
     prim = stage.GetPrimAtPath(cam_prim_path)
-    attrs = {
-        "omni:lensdistortion:model": "ftheta",
-        "omni:lensdistortion:ftheta:nominalWidth": float(CAM_W),
-        "omni:lensdistortion:ftheta:nominalHeight": float(CAM_H),
-        "omni:lensdistortion:ftheta:opticalCentreX": float(cx),
-        "omni:lensdistortion:ftheta:opticalCentreY": float(cy),
-        "omni:lensdistortion:ftheta:maxFov": float(DIAG_FOV_DEG),
-        "omni:lensdistortion:ftheta:p0": 0.0,
-        "omni:lensdistortion:ftheta:p1": float(K1_EQUIDISTANT),
-        "omni:lensdistortion:ftheta:p2": 0.0,
-        "omni:lensdistortion:ftheta:p3": 0.0,
-        "omni:lensdistortion:ftheta:p4": 0.0,
-        "fStop": 0.0,
-    }
-    for attr_name, val in attrs.items():
-        attr = prim.GetAttribute(attr_name)
-        if not attr:
-            if isinstance(val, float):
-                attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.Float)
-            elif isinstance(val, str):
-                attr = prim.CreateAttribute(attr_name, Sdf.ValueTypeNames.String)
-        if attr:
-            attr.Set(val)
+    # 必须 ApplyAPI，否则渲染器忽略 ftheta 属性
+    prim.ApplyAPI("OmniLensDistortionFthetaAPI")
+    prim.GetAttribute("omni:lensdistortion:model").Set("ftheta")
+    prim.GetAttribute("omni:lensdistortion:ftheta:nominalWidth").Set(float(CAM_W))
+    prim.GetAttribute("omni:lensdistortion:ftheta:nominalHeight").Set(float(CAM_H))
+    # opticalCenter 是元组！不是 opticalCentreX/Y
+    prim.GetAttribute("omni:lensdistortion:ftheta:opticalCenter").Set((float(cx), float(cy)))
+    prim.GetAttribute("omni:lensdistortion:ftheta:maxFov").Set(float(DIAG_FOV_DEG))
+    # k0-k4（不是 p0-p4！）
+    prim.GetAttribute("omni:lensdistortion:ftheta:k0").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k1").Set(float(K1_EQUIDISTANT))
+    prim.GetAttribute("omni:lensdistortion:ftheta:k2").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k3").Set(0.0)
+    prim.GetAttribute("omni:lensdistortion:ftheta:k4").Set(0.0)
+    prim.GetAttribute("fStop").Set(0.0)  # 禁用景深模糊
 ```
 
 **2. 使用 omni.replicator annotator 异步采集**
@@ -535,6 +532,162 @@ voxel_grid.semantic[:, :, Z_GI][miss_mask] = OTHER_GROUND
 - free/occupied 边界检测
 - z±1 层对比
 - PhysX 边界效应量化
+
+## Isaac Sim Python 环境限制（重要经验）
+
+### GUI 不可用
+
+Isaac Sim 内置 Python 的 `cv2` 是 **headless 编译**（无 `highgui` 模块），且 **没有 `_tkinter`**。
+因此以下 GUI 操作全部不可用：
+- ❌ `cv2.imshow()` / `cv2.namedWindow()` → 报 `The function is not implemented`
+- ❌ `matplotlib` TkAgg 后端 → 报 `No module named '_tkinter'`
+- ❌ 任何依赖 tkinter 的 GUI（filedialog 等）
+
+**替代方案**：
+- 可视化工具生成 **HTML 文件**，用 `webbrowser.open()` 在浏览器中查看
+- 图像处理用 `cv2.imread/imwrite`（文件读写正常，只是 GUI 不行）
+- `PIL/Pillow` 可用于图像加载和 base64 编码
+- `tifffile` 可用于 DNG/TIFF 读写（Isaac Sim Python 自带）
+
+### stdout 缓冲
+
+通过 `isaaclab.bat` 运行脚本时，stdout 被 `cmd //c` 管道**全缓冲**，`print()` 输出可能延迟到脚本结束才显示。
+
+**解决方案**：在脚本顶部强制刷新：
+```python
+import builtins
+_original_print = builtins.print
+def _flush_print(*a, **kw):
+    kw.setdefault("flush", True)
+    _original_print(*a, **kw)
+builtins.print = _flush_print
+```
+
+或用文件日志记录关键进度。
+
+## Camera 类 vs USD prim 朝向差异（重要经验）
+
+### 问题
+
+`isaacsim.sensors.camera.Camera` 类和直接操作 USD prim 使用**相同的 euler 角**会产生**不同的朝向**。
+
+### 根因
+
+Camera 类假设光轴为 **+X**，但 USD 相机标准光轴为 **-Z**。Camera 类在内部自动叠加一个 **R_y(-90°)** 旋转来做 +X → -Z 的转换：
+
+```
+Q_usd_final = Q_user × Q_y(-90°)
+```
+
+直接操作 USD prim 的 `xformOp:orient` 时，**没有**这个内部转换。
+
+### 实际影响
+
+| 设置方式 | euler = [0, 90, 0] 的效果 |
+|----------|--------------------------|
+| Camera 类 | 向下俯视（正确） |
+| USD prim 直接 | 侧面朝向（错误） |
+
+### 正确做法
+
+- 用 **Camera 类**：直接传入想要的 euler，类内部处理转换
+- 用 **USD prim 直接操作**：要么手动补偿 `Q_usd = Q_isaac × Q_y(-90°)`，要么使用 `euler = [0, 0, 90]`（绕 Z 轴 90° 使 -Z 指向地面，这是 `stereo_voxel_capture.py` 的做法）
+
+**经验**：两种方式不要混用。选定一种后保持一致。`stereo_voxel_capture.py` 系列脚本统一使用 USD prim 直接操作 + `euler = [0, 0, 90]`。
+
+## opencv_fisheye 模型 ≠ 针孔（重要经验）
+
+### 常见误解
+
+`set_opencv_fisheye_properties(k=[0,0,0,0])` **不是**针孔投影。
+
+### 实际行为
+
+即使所有畸变系数 k 都为 0，`opencv_fisheye` 模型仍然激活**等距鱼眼投影**（r = f·θ），产生约 **148°** 对角 FOV。针孔模型相同焦距下仅 **89°**。
+
+这是因为 `opencv_fisheye` 的基础模型就是等距投影，k 参数只是在此基础上叠加高阶畸变。
+
+### 与 ftheta 的关系
+
+`ftheta` 模型 `k1=1/fx, 其余=0` 在数学上等价于 `opencv_fisheye k=[0,0,0,0]`——都是 r = f·θ 等距投影。区别在于：
+- `ftheta` 是 **RTX 原生渲染**，`maxFov` 直接控制渲染 FOV
+- `opencv_fisheye` 是**后处理畸变**，不改变底层渲染 FOV
+
+**结论**：需要超广角鱼眼时，始终用 `ftheta`。
+
+## 伪 RAW/DNG 管线（开发经验）
+
+### 概述
+
+从 Isaac Sim RGB 渲染图生成逼真的 12-bit Bayer RAW DNG 文件，模拟真实传感器输出。
+
+### 管线流程
+
+```
+RGB(uint8) → sRGB 解码 → linear(float32) → RGGB Bayer CFA 马赛克 → 传感器噪声 → 12-bit 量化(uint16) → DNG
+```
+
+### 关键实现
+
+**DNG 写入：纯 tifffile，不需要 exiftool**
+```python
+import tifffile
+import numpy as np
+
+# bayer_uint16: (H, W) uint16 Bayer RAW 数据
+tifffile.imwrite(
+    path, bayer_uint16,
+    photometric='cfa',            # CFA (Color Filter Array)
+    compression='none',
+    extratags=[
+        (50706, 1, 4, (1, 4, 0, 0)),    # DNGVersion 1.4
+        (50710, 1, 1, (2,)),              # CFAPlaneColor
+        (50711, 3, 1, (1,)),              # CFALayout
+        (33421, 3, 2, (2, 2)),            # CFARepeatPatternDim
+        (33422, 1, 4, (0, 1, 1, 2)),     # CFAPattern (RGGB)
+        (50714, 3, 1, (black_level,)),    # BlackLevel
+        (50717, 3, 1, (white_level,)),    # WhiteLevel
+        (50721, 12, 9, color_matrix),     # ColorMatrix1
+        (50778, 3, 1, (21,)),             # CalibrationIlluminant1 (D65)
+    ],
+)
+```
+
+**传感器噪声模型（5 种来源）**：
+- PRNU（像素响应非均匀性）— 乘性，每个传感器固定
+- 散粒噪声（Shot noise）— 泊松分布，与信号强度成正比
+- 暗电流（Dark current）— 高斯，与曝光时间正比
+- 读出噪声（Read noise）— 高斯，固定标准差
+- 行噪声（Row noise）— 每行共模偏移
+
+### 组件包
+
+`projects/stereo_voxel/scripts/rawcam/` — 可复用的 RAW 相机仿真组件：
+- `core/`：纯 Python 层（RawConverter, DngWriter, NoiseModel），不依赖 Isaac Sim
+- `sim/`：Isaac Sim 封装层（StereoRawRig, RawCamera），处理 USD prim 创建和 annotator
+- `configs/`：数据类（SensorConfig, NoiseConfig, OutputConfig）+ 传感器预设（SC132GS 等）
+
+### 端到端验证方法
+
+验证 DNG 变体脚本与原版一致性的标准流程：
+```bash
+# 1. 分别运行两个脚本（无 NPC，消除随机性）
+isaaclab.bat -p .../stereo_voxel_capture.py --headless --num_frames 5 --no_npc --capture_interval 30
+isaaclab.bat -p .../stereo_voxel_capture_dng.py --headless --num_frames 5 --no_npc --capture_interval 30
+
+# 2. 自动化对比
+python .../compare_capture_outputs.py
+```
+
+**验证指标**：
+- RGB NCC（归一化互相关）> 0.99 = 像素级一致（渲染非确定性导致 < 1.0）
+- 体素 match_rate = 1.0（无 NPC 时静态场景完全确定）
+- DNG 值域在 12-bit 范围内 [0, 4095]
+- calibration.json 全部参数匹配
+
+### 变体脚本开发原则
+
+**始终复制原版最小修改**，不要从零重写。确保相机设置、场景加载、体素查询代码完全一致，仅替换图像保存管线。
 
 ## Licenses
 

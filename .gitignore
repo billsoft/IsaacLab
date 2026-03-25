@@ -79,3 +79,9 @@ tests/
 # Assets (local downloaded assets, not part of the repo)
 Assets/
 Environments/
+
+*.png
+*.dng
+*.jpg
+projects/stereo_voxel/output_dng/*
+

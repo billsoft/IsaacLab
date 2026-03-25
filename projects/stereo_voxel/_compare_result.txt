@@ -1,0 +1,85 @@
+======================================================================
+PART 1: stereo_voxel_capture.py 输出 (output/)
+======================================================================
+帧数: left=5, right=5
+  left/frame_000000.png: shape=(1080, 1280, 3), mean=104.7
+  left/frame_000001.png: shape=(1080, 1280, 3), mean=104.9
+  left/frame_000002.png: shape=(1080, 1280, 3), mean=105.1
+  left/frame_000003.png: shape=(1080, 1280, 3), mean=105.2
+  left/frame_000004.png: shape=(1080, 1280, 3), mean=105.3
+  right/frame_000000.png: shape=(1080, 1280, 3), mean=104.9
+  right/frame_000001.png: shape=(1080, 1280, 3), mean=105.2
+  right/frame_000002.png: shape=(1080, 1280, 3), mean=105.4
+  right/frame_000003.png: shape=(1080, 1280, 3), mean=105.5
+  right/frame_000004.png: shape=(1080, 1280, 3), mean=105.6
+[PASS] 原版无全黑帧 (5 对)
+
+======================================================================
+PART 2: stereo_voxel_capture_dng.py 输出 (output_dng/)
+======================================================================
+RGB 帧数: left=5, right=5
+  left/frame_000000.png: shape=(1080, 1280, 3), mean=105.0
+  left/frame_000001.png: shape=(1080, 1280, 3), mean=105.3
+  left/frame_000002.png: shape=(1080, 1280, 3), mean=105.3
+  left/frame_000003.png: shape=(1080, 1280, 3), mean=105.3
+  left/frame_000004.png: shape=(1080, 1280, 3), mean=105.4
+  right/frame_000000.png: shape=(1080, 1280, 3), mean=105.3
+  right/frame_000001.png: shape=(1080, 1280, 3), mean=105.6
+  right/frame_000002.png: shape=(1080, 1280, 3), mean=105.6
+  right/frame_000003.png: shape=(1080, 1280, 3), mean=105.7
+  right/frame_000004.png: shape=(1080, 1280, 3), mean=105.7
+[PASS] DNG 版 RGB 无全黑帧 (5 对)
+
+--- DNG 文件检查 ---
+left_dng: 5 个 DNG 文件
+  frame_000000.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000001.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000002.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000003.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000004.dng: 2,765,216B (tifffile 未安装，跳过解码)
+[PASS] left_dng DNG 解码正常
+right_dng: 5 个 DNG 文件
+  frame_000000.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000001.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000002.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000003.dng: 2,765,216B (tifffile 未安装，跳过解码)
+  frame_000004.dng: 2,765,216B (tifffile 未安装，跳过解码)
+[PASS] right_dng DNG 解码正常
+
+======================================================================
+PART 3: calibration.json 对比
+======================================================================
+原版: projection=ftheta_equidistant, res=[1280, 1080], baseline=0.08
+DNG版: projection=ftheta_equidistant, res=[1280, 1080], baseline=0.08
+  raw_pipeline: DNG (12-bit Bayer RGGB), noise=sc132gs
+[PASS] calibration 全部 10 项参数一致
+
+======================================================================
+PART 4: 同帧号 RGB 像素对比
+======================================================================
+说明: 两个脚本独立运行，场景相同但时间步不同，
+      因此 NPC 不一定在同位置。静态场景部分应高度一致。
+  帧 0 (frame_000000.png vs frame_000000.png): mean_diff=0.83, max_diff=29, NCC=0.9995
+  帧 1 (frame_000001.png vs frame_000001.png): mean_diff=0.82, max_diff=30, NCC=0.9995
+  帧 2 (frame_000002.png vs frame_000002.png): mean_diff=0.76, max_diff=30, NCC=0.9995
+  帧 3 (frame_000003.png vs frame_000003.png): mean_diff=0.74, max_diff=29, NCC=0.9995
+  帧 4 (frame_000004.png vs frame_000004.png): mean_diff=0.75, max_diff=27, NCC=0.9995
+平均 NCC=0.9995
+[PASS] RGB 高度相似 (avg NCC=0.9995 > 0.95)
+对比图: D:\code\IsaacLab\projects\stereo_voxel\_compare_left_frame0.png
+
+======================================================================
+PART 5: 体素 GT 对比
+======================================================================
+原版体素: 5, DNG版体素: 5
+  帧 0: match_rate=1.0000, occupied: orig=34560, dng=34560
+  帧 1: match_rate=1.0000, occupied: orig=34560, dng=34560
+  帧 2: match_rate=1.0000, occupied: orig=34560, dng=34560
+  帧 3: match_rate=1.0000, occupied: orig=34560, dng=34560
+  帧 4: match_rate=1.0000, occupied: orig=34560, dng=34560
+[PASS] 体素 GT 高度一致
+
+======================================================================
+总结: 7 PASS, 0 FAIL, 0 WARN
+======================================================================
+端到端验证通过!
