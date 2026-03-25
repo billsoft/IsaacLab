@@ -477,6 +477,65 @@ def wait_pending_saves():
 
 完整实现见：`projects/stereo_voxel/scripts/test_stereo_pair.py`
 
+## PhysX 体素查询地面边界效应（重要经验）
+
+### 问题现象
+
+使用 PhysX `overlap_box` 填充语义体素网格时，地面层（z=Z_GROUND_INDEX=7）只有约 **51%** 的体素被正确检测为 occupied，另一半被误标为 free。缺失区域呈干净的直线分界（X=CENTER_X），而非随机分布。
+
+### 根因分析
+
+体素网格参数：
+- `VOXEL_SIZE = 0.1m`，`Z_GROUND_INDEX = 7`
+- z=7 体素中心 = `(7 - 7 + 0.5) * 0.1 = +0.05m`
+- `fine_half = VOXEL_SIZE / 2 = 0.05m`
+- PhysX box z 范围 = `[0.05 - 0.05, 0.05 + 0.05] = [0.00, 0.10]m`
+
+地面平面（GroundPlane）碰撞体在 z=0.0m。PhysX `overlap_box` 的下边界 **恰好** 在 z=0.0m，属于精确边界接触。PhysX 对这种零重叠的边界碰撞检测 **不稳定** —— 部分体素检测到碰撞，部分漏检，取决于浮点精度和内部空间划分。
+
+### 修复方案
+
+**双重保障**（已在 `stereo_voxel_capture.py` 的 `fill_voxel_grid()` 中实现）：
+
+**方案 A（主修复）**：将地面层查询中心 z 坐标下移 2mm
+```python
+Z_GI = voxel_grid.Z_GROUND_INDEX
+GROUND_Z_NUDGE = 0.002 * meters_to_stage  # 2mm
+world_centers_stage[:, :, Z_GI, 2] -= GROUND_Z_NUDGE
+```
+效果：PhysX box 下边界从 z=0.0 变为 z=-0.002m，确保与地面明确重叠。
+
+**方案 C（后处理兜底）**：如果 z=Z_GI 仍为 free 但 z=Z_GI-1（地下层）有 occupied，用 `OTHER_GROUND(12)` 填充
+```python
+miss_mask = (ground == FREE) & (underground > 0) & (underground != UNOBSERVED)
+voxel_grid.semantic[:, :, Z_GI][miss_mask] = OTHER_GROUND
+```
+
+### 修复效果
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| z=7 占用率 | 51.4% (2220/4320) | 100.0% (4320/4320) |
+| 总占用体素 | 32838 | 34938 |
+| 四象限覆盖 | X-=100%, X+=2.8% | 全部 100% |
+
+### 关键教训
+
+1. **PhysX overlap 在精确边界上不可靠**：box 边界恰好接触碰撞面时，结果不确定
+2. **始终给边界查询留 epsilon 余量**：1-2mm 的 nudge 足够消除不稳定性
+3. **用 `diag_voxel.py` 诊断**：逐层分析 + 象限分析 + 边界检测可快速定位问题
+4. **后处理兜底是必要的**：即使主修复有效，利用地下层数据兜底更安全
+
+### 诊断工具
+
+`projects/stereo_voxel/scripts/diag_voxel.py` —— 体素地面诊断脚本，分析：
+- 总体类别分布
+- 逐层 Z 占用率
+- 地面层 XY 象限占用
+- free/occupied 边界检测
+- z±1 层对比
+- PhysX 边界效应量化
+
 ## Licenses
 
 - Core code: BSD-3-Clause
