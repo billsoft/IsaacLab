@@ -82,8 +82,9 @@ class StereoOccDataset(Dataset):
           f-theta +X (图像右) → World +Y (左)
           f-theta +Y (图像下) → World +X (前)
         """
-        cos_y = np.cos(cam_yaw)
-        sin_y = np.sin(cam_yaw)
+        import math
+        cos_y = math.cos(cam_yaw)
+        sin_y = math.sin(cam_yaw)
         # R = R_z(yaw + 90°) @ diag(1, -1, -1), 化简后:
         R = torch.tensor([
             [-sin_y, cos_y, 0.0],
@@ -191,7 +192,10 @@ class StereoOccDataset(Dataset):
         E = torch.eye(4).unsqueeze(0).repeat(2, 1, 1)  # [2, 4, 4]
         E[:, :3, :3] = R
 
-        # 相机高度
+        # 平移: 只需高度, X/Y 为 0
+        # 注意: cam_pos[0], cam_pos[1] 是世界绝对坐标, 但体素网格原点已对齐到
+        # 相机地面投影点 (stereo_voxel_capture_dng.py 中 voxel_origin = cam_ground_proj),
+        # 所以在体素局部坐标系中相机 X=0, Y=0, 仅保留 Z=height
         E[:, 2, 3] = cam_pos[2]  # z = height
 
         # 双目基线偏移 (Y 方向)

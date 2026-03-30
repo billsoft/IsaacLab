@@ -38,6 +38,11 @@ class OccupancyLoss(nn.Module):
         return {'total': total_loss, 'ce': ce_loss, 'lovasz': lovasz_loss}
 
     def _lovasz_softmax(self, pred, target):
+        """Lovasz-Softmax, 强制 FP32 避免 AMP FP16 下 softmax+sort 精度损失"""
+        with torch.amp.autocast('cuda', enabled=False):
+            return self._lovasz_softmax_fp32(pred.float(), target)
+
+    def _lovasz_softmax_fp32(self, pred, target):
         B, C, X, Y, Z = pred.shape
         prob = F.softmax(pred, dim=1)
         prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)

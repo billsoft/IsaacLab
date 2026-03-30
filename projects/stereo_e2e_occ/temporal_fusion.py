@@ -111,7 +111,7 @@ class TemporalFusionModule(nn.Module):
         grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)
 
         aligned_vol = F.grid_sample(
-            mem_vol, grid_warped, mode='bilinear', padding_mode='zeros', align_corners=True,
+            mem_vol, grid_warped, mode='bilinear', padding_mode='zeros', align_corners=False,
         )
         aligned = aligned_vol.permute(0, 3, 4, 2, 1).reshape(B, Q, C)
         return aligned

@@ -107,7 +107,19 @@ class OccupancyDecoder(nn.Module):
         cx, cy, cz = self.config.coarse_size
 
         # 预计算外参逆矩阵 (所有 decoder 层共享, 避免重复求逆)
-        inv_extrinsics = torch.inverse(extrinsics) if extrinsics is not None else None
+        # 外参是刚体变换, 用解析公式: R_inv = R^T, t_inv = -R^T @ t
+        # 比 torch.inverse() 更快且 FP16 下数值更稳定
+        if extrinsics is not None:
+            R = extrinsics[..., :3, :3]            # [B, N, 3, 3]
+            t = extrinsics[..., :3, 3:]            # [B, N, 3, 1]
+            R_inv = R.transpose(-1, -2)            # [B, N, 3, 3]
+            t_inv = -torch.matmul(R_inv, t)        # [B, N, 3, 1]
+            inv_extrinsics = torch.zeros_like(extrinsics)
+            inv_extrinsics[..., :3, :3] = R_inv
+            inv_extrinsics[..., :3, 3:] = t_inv
+            inv_extrinsics[..., 3, 3] = 1.0
+        else:
+            inv_extrinsics = None
 
         # --- 粗阶段 ---
         query = self.coarse_query.expand(B, -1, -1) + self.coarse_pos.unsqueeze(0)

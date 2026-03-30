@@ -94,7 +94,12 @@ class DeformableCrossAttention(nn.Module):
         v_norm = 2.0 * v / (orig_H - 1) - 1.0
 
         ref_points = torch.stack([u_norm, v_norm], dim=-1)  # [B, N, Q, 2]
-        return ref_points
+
+        # FOV 有效性掩码: 相机后方 (cam_z<0) 或超出 FOV 的点标记为无效
+        max_fov_rad = self.config.max_fov_deg / 2.0 * (3.14159265 / 180.0) if self.config is not None else 1.372
+        fov_mask = (cam_z > 0) & (theta < max_fov_rad)  # [B, N, Q]
+
+        return ref_points, fov_mask
 
     def forward(self, query, query_coords, image_feats, intrinsics=None, inv_extrinsics=None):
         """
@@ -107,11 +112,12 @@ class DeformableCrossAttention(nn.Module):
         B, Q, C = query.shape
         _, N, _, H, W = image_feats.shape
 
-        # 1. 参考点
+        # 1. 参考点 + FOV 掩码
         if intrinsics is not None and inv_extrinsics is not None:
-            reference_points = self.get_reference_points(query_coords, intrinsics, inv_extrinsics, H, W)
+            reference_points, fov_mask = self.get_reference_points(query_coords, intrinsics, inv_extrinsics, H, W)
         else:
             reference_points = torch.zeros(B, N, Q, 2, device=query.device)
+            fov_mask = torch.ones(B, N, Q, dtype=torch.bool, device=query.device)
 
         # 2. 偏移与权重
         offsets = self.sampling_offsets(query)
@@ -120,43 +126,43 @@ class DeformableCrossAttention(nn.Module):
 
         attn_weights = self.attention_weights(query)
         attn_weights = attn_weights.view(B, Q, N, self.num_heads, self.num_points)
+        # 将超出 FOV 的参考点权重置零 (减轻网络学习无效投影的负担)
+        # fov_mask: [B, N, Q] → [B, Q, N, 1, 1]
+        fov_weight_mask = fov_mask.permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+        attn_weights = attn_weights * fov_weight_mask
         attn_weights = F.softmax(attn_weights, dim=-1)
 
         # 3. Value 投影
         value_proj = self.value_proj(image_feats.permute(0, 1, 3, 4, 2))
         value_proj = value_proj.view(B, N, H, W, self.num_heads, self.head_dim)
 
-        # 4. 逐相机批量采样 (head 维度合并到 batch, 每相机 1 次 grid_sample)
-        output = torch.zeros(B, Q, self.num_heads, self.head_dim, device=query.device)
+        # 4. 全相机+全头批量采样 (N 和 num_heads 合并到 batch, 1 次 grid_sample)
+        # reference_points: [B, N, Q, 2]
+        # offsets: [B, Q, N, num_heads, num_points, 2]
+        ref_exp = reference_points.permute(0, 1, 2, 3)  # [B, N, Q, 2]
+        ref_exp = ref_exp.unsqueeze(3).unsqueeze(4)       # [B, N, Q, 1, 1, 2]
+        locs = ref_exp + offsets.permute(0, 2, 1, 3, 4, 5)  # [B, N, Q, num_heads, num_points, 2]
 
-        for cam in range(N):
-            ref_cam = reference_points[:, cam]       # [B, Q, 2]
-            off_cam = offsets[:, :, cam]              # [B, Q, num_heads, num_points, 2]
-            w_cam = attn_weights[:, :, cam]           # [B, Q, num_heads, num_points]
-            v_cam = value_proj[:, cam]                # [B, H, W, num_heads, head_dim]
+        # value: [B, N, H, W, num_heads, head_dim] → [B*N*num_heads, head_dim, H, W]
+        v_all = value_proj.permute(0, 1, 4, 5, 2, 3).reshape(
+            B * N * self.num_heads, self.head_dim, H, W)
+        # locs: [B, N, Q, num_heads, num_points, 2] → [B*N*num_heads, Q*num_points, 1, 2]
+        locs_all = locs.permute(0, 1, 3, 2, 4, 5).reshape(
+            B * N * self.num_heads, Q * self.num_points, 1, 2)
 
-            # 采样坐标: ref + offset → [B, Q, num_heads, num_points, 2]
-            locs = ref_cam.unsqueeze(2).unsqueeze(3) + off_cam
+        # 单次 grid_sample (替代原来 N×num_heads 次循环)
+        sampled = F.grid_sample(
+            v_all, locs_all,
+            mode='bilinear', align_corners=False, padding_mode='zeros',
+        )  # [B*N*num_heads, head_dim, Q*num_points, 1]
 
-            # 将 head 维度合并到 batch 维度, 单次 grid_sample
-            # value: [B, H, W, num_heads, head_dim] → [B*num_heads, head_dim, H, W]
-            v_batched = v_cam.permute(0, 3, 4, 1, 2).reshape(
-                B * self.num_heads, self.head_dim, H, W)
-            # locs: [B, Q, num_heads, num_points, 2] → [B*num_heads, Q*num_points, 1, 2]
-            locs_batched = locs.permute(0, 2, 1, 3, 4).reshape(
-                B * self.num_heads, Q * self.num_points, 1, 2)
-
-            # 单次 grid_sample 替代原来 num_heads 次循环
-            sampled = F.grid_sample(
-                v_batched, locs_batched,
-                mode='bilinear', align_corners=False, padding_mode='zeros',
-            )  # [B*num_heads, head_dim, Q*num_points, 1]
-
-            # 还原维度并加权求和
-            sampled = sampled.view(B, self.num_heads, self.head_dim, Q, self.num_points)
-            sampled = sampled.permute(0, 3, 1, 4, 2)  # [B, Q, num_heads, num_points, head_dim]
-            weighted = (sampled * w_cam.unsqueeze(-1)).sum(dim=3)  # [B, Q, num_heads, head_dim]
-            output = output + weighted
+        # 还原维度: [B, N, num_heads, head_dim, Q, num_points]
+        sampled = sampled.view(B, N, self.num_heads, self.head_dim, Q, self.num_points)
+        # → [B, Q, N, num_heads, num_points, head_dim]
+        sampled = sampled.permute(0, 4, 1, 2, 5, 3)
+        # attn_weights: [B, Q, N, num_heads, num_points] → 加权求和
+        weighted = (sampled * attn_weights.unsqueeze(-1)).sum(dim=4)  # [B, Q, N, num_heads, head_dim]
+        output = weighted.sum(dim=2)  # [B, Q, num_heads, head_dim] (对 N 个相机求和)
 
         output = output.view(B, Q, C)
         output = self.output_proj(output)

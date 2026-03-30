@@ -199,6 +199,12 @@ def main():
         if unexpected:
             print(f'多余键 (忽略): {unexpected}')
         optimizer.load_state_dict(ckpt['optimizer'])
+        if 'scheduler' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler'])
+            print("已恢复 scheduler 状态")
+        if 'scaler' in ckpt:
+            scaler.load_state_dict(ckpt['scaler'])
+            print("已恢复 scaler 状态")
         start_epoch = ckpt['epoch'] + 1
         print(f"从 epoch {start_epoch - 1} 恢复成功")
 
@@ -233,6 +239,8 @@ def main():
                 'epoch': epoch,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
                 'loss': val_loss,
                 'config': config,
             }, os.path.join(args.output_dir, 'best_model.pth'))

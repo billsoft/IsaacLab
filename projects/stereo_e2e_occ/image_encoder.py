@@ -85,15 +85,6 @@ class ImageEncoder(nn.Module):
         ])
         self.norm = nn.LayerNorm(config.embed_dim)
 
-    def _process_single_camera(self, x, rays=None):
-        """x: [B, 1, H, W, C] → [B, H, W, C]"""
-        x = x.squeeze(1)
-        if rays is not None:
-            x = x + rays.squeeze(1)
-        for block in self.blocks:
-            x = block(x)
-        return x
-
     def forward(self, x, intrinsics=None, extrinsics=None):
         """
         x: [B, N, C, H, W]  N=2
@@ -107,14 +98,15 @@ class ImageEncoder(nn.Module):
 
         x = x.permute(0, 1, 3, 4, 2)  # [B, N, H, W, C]
 
-        outs = []
-        for i in range(N):
-            x_cam = x[:, i:i + 1]
-            ray_cam = ray_feat[:, i:i + 1] if ray_feat is not None else None
-            out_cam = self._process_single_camera(x_cam, ray_cam)
-            outs.append(out_cam)
+        # N 个相机合并到 batch 维度并行处理 (共享参数, 消除 Python for 循环)
+        if ray_feat is not None:
+            x = x + ray_feat
+        x = x.reshape(B * N, H, W, C)  # [B*N, H, W, C]
 
-        x = torch.stack(outs, dim=1)  # [B, N, H, W, C]
+        for block in self.blocks:
+            x = block(x)
+
+        x = x.view(B, N, H, W, C)
         x = self.norm(x)
         x = x.permute(0, 1, 4, 2, 3)  # [B, N, C, H, W]
         return x

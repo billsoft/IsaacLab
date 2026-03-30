@@ -4,7 +4,7 @@
 
 统计信息:
   文件数: 17
-  总行数: 2270
+  总行数: 2305
 
 ================================================================================
 文件结构
@@ -13,19 +13,19 @@
 stereo_e2e_occ/
 ├── __init__.py  (6 行)
 ├── config.py  (102 行)
-├── dataset.py  (253 行)
-├── deformable_attention.py  (192 行)
+├── dataset.py  (257 行)
+├── deformable_attention.py  (198 行)
 ├── e2e_occ_net.py  (71 行)
-├── image_encoder.py  (120 行)
-├── inference.py  (161 行)
-├── loss.py  (78 行)
-├── occ_decoder.py  (153 行)
+├── image_encoder.py  (112 行)
+├── inference.py  (165 行)
+├── loss.py  (83 行)
+├── occ_decoder.py  (165 行)
 ├── position_encoding.py  (163 行)
 ├── prepare_splits.py  (69 行)
 ├── raw_embed.py  (63 行)
 ├── temporal_fusion.py  (137 行)
 ├── test.py  (102 行)
-├── train.py  (239 行)
+├── train.py  (251 行)
 ├── verify_shapes.py  (298 行)
 └── voxel_head.py  (63 行)
 
@@ -152,7 +152,7 @@ class StereoOccConfig:
 
 
 --------------------------------------------------------------------------------
-文件: dataset.py (253 行)
+文件: dataset.py (257 行)
 --------------------------------------------------------------------------------
 """
 数据集加载器
@@ -238,8 +238,9 @@ class StereoOccDataset(Dataset):
           f-theta +X (图像右) → World +Y (左)
           f-theta +Y (图像下) → World +X (前)
         """
-        cos_y = np.cos(cam_yaw)
-        sin_y = np.sin(cam_yaw)
+        import math
+        cos_y = math.cos(cam_yaw)
+        sin_y = math.sin(cam_yaw)
         # R = R_z(yaw + 90°) @ diag(1, -1, -1), 化简后:
         R = torch.tensor([
             [-sin_y, cos_y, 0.0],
@@ -347,7 +348,10 @@ class StereoOccDataset(Dataset):
         E = torch.eye(4).unsqueeze(0).repeat(2, 1, 1)  # [2, 4, 4]
         E[:, :3, :3] = R
 
-        # 相机高度
+        # 平移: 只需高度, X/Y 为 0
+        # 注意: cam_pos[0], cam_pos[1] 是世界绝对坐标, 但体素网格原点已对齐到
+        # 相机地面投影点 (stereo_voxel_capture_dng.py 中 voxel_origin = cam_ground_proj),
+        # 所以在体素局部坐标系中相机 X=0, Y=0, 仅保留 Z=height
         E[:, 2, 3] = cam_pos[2]  # z = height
 
         # 双目基线偏移 (Y 方向)
@@ -410,7 +414,7 @@ def get_dataloader(data_root, split='train', batch_size=1, num_workers=0, config
 
 
 --------------------------------------------------------------------------------
-文件: deformable_attention.py (192 行)
+文件: deformable_attention.py (198 行)
 --------------------------------------------------------------------------------
 """
 可变形交叉注意力
@@ -508,7 +512,12 @@ class DeformableCrossAttention(nn.Module):
         v_norm = 2.0 * v / (orig_H - 1) - 1.0
 
         ref_points = torch.stack([u_norm, v_norm], dim=-1)  # [B, N, Q, 2]
-        return ref_points
+
+        # FOV 有效性掩码: 相机后方 (cam_z<0) 或超出 FOV 的点标记为无效
+        max_fov_rad = self.config.max_fov_deg / 2.0 * (3.14159265 / 180.0) if self.config is not None else 1.372
+        fov_mask = (cam_z > 0) & (theta < max_fov_rad)  # [B, N, Q]
+
+        return ref_points, fov_mask
 
     def forward(self, query, query_coords, image_feats, intrinsics=None, inv_extrinsics=None):
         """
@@ -521,11 +530,12 @@ class DeformableCrossAttention(nn.Module):
         B, Q, C = query.shape
         _, N, _, H, W = image_feats.shape
 
-        # 1. 参考点
+        # 1. 参考点 + FOV 掩码
         if intrinsics is not None and inv_extrinsics is not None:
-            reference_points = self.get_reference_points(query_coords, intrinsics, inv_extrinsics, H, W)
+            reference_points, fov_mask = self.get_reference_points(query_coords, intrinsics, inv_extrinsics, H, W)
         else:
             reference_points = torch.zeros(B, N, Q, 2, device=query.device)
+            fov_mask = torch.ones(B, N, Q, dtype=torch.bool, device=query.device)
 
         # 2. 偏移与权重
         offsets = self.sampling_offsets(query)
@@ -534,43 +544,43 @@ class DeformableCrossAttention(nn.Module):
 
         attn_weights = self.attention_weights(query)
         attn_weights = attn_weights.view(B, Q, N, self.num_heads, self.num_points)
+        # 将超出 FOV 的参考点权重置零 (减轻网络学习无效投影的负担)
+        # fov_mask: [B, N, Q] → [B, Q, N, 1, 1]
+        fov_weight_mask = fov_mask.permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+        attn_weights = attn_weights * fov_weight_mask
         attn_weights = F.softmax(attn_weights, dim=-1)
 
         # 3. Value 投影
         value_proj = self.value_proj(image_feats.permute(0, 1, 3, 4, 2))
         value_proj = value_proj.view(B, N, H, W, self.num_heads, self.head_dim)
 
-        # 4. 逐相机批量采样 (head 维度合并到 batch, 每相机 1 次 grid_sample)
-        output = torch.zeros(B, Q, self.num_heads, self.head_dim, device=query.device)
+        # 4. 全相机+全头批量采样 (N 和 num_heads 合并到 batch, 1 次 grid_sample)
+        # reference_points: [B, N, Q, 2]
+        # offsets: [B, Q, N, num_heads, num_points, 2]
+        ref_exp = reference_points.permute(0, 1, 2, 3)  # [B, N, Q, 2]
+        ref_exp = ref_exp.unsqueeze(3).unsqueeze(4)       # [B, N, Q, 1, 1, 2]
+        locs = ref_exp + offsets.permute(0, 2, 1, 3, 4, 5)  # [B, N, Q, num_heads, num_points, 2]
 
-        for cam in range(N):
-            ref_cam = reference_points[:, cam]       # [B, Q, 2]
-            off_cam = offsets[:, :, cam]              # [B, Q, num_heads, num_points, 2]
-            w_cam = attn_weights[:, :, cam]           # [B, Q, num_heads, num_points]
-            v_cam = value_proj[:, cam]                # [B, H, W, num_heads, head_dim]
+        # value: [B, N, H, W, num_heads, head_dim] → [B*N*num_heads, head_dim, H, W]
+        v_all = value_proj.permute(0, 1, 4, 5, 2, 3).reshape(
+            B * N * self.num_heads, self.head_dim, H, W)
+        # locs: [B, N, Q, num_heads, num_points, 2] → [B*N*num_heads, Q*num_points, 1, 2]
+        locs_all = locs.permute(0, 1, 3, 2, 4, 5).reshape(
+            B * N * self.num_heads, Q * self.num_points, 1, 2)
 
-            # 采样坐标: ref + offset → [B, Q, num_heads, num_points, 2]
-            locs = ref_cam.unsqueeze(2).unsqueeze(3) + off_cam
+        # 单次 grid_sample (替代原来 N×num_heads 次循环)
+        sampled = F.grid_sample(
+            v_all, locs_all,
+            mode='bilinear', align_corners=False, padding_mode='zeros',
+        )  # [B*N*num_heads, head_dim, Q*num_points, 1]
 
-            # 将 head 维度合并到 batch 维度, 单次 grid_sample
-            # value: [B, H, W, num_heads, head_dim] → [B*num_heads, head_dim, H, W]
-            v_batched = v_cam.permute(0, 3, 4, 1, 2).reshape(
-                B * self.num_heads, self.head_dim, H, W)
-            # locs: [B, Q, num_heads, num_points, 2] → [B*num_heads, Q*num_points, 1, 2]
-            locs_batched = locs.permute(0, 2, 1, 3, 4).reshape(
-                B * self.num_heads, Q * self.num_points, 1, 2)
-
-            # 单次 grid_sample 替代原来 num_heads 次循环
-            sampled = F.grid_sample(
-                v_batched, locs_batched,
-                mode='bilinear', align_corners=False, padding_mode='zeros',
-            )  # [B*num_heads, head_dim, Q*num_points, 1]
-
-            # 还原维度并加权求和
-            sampled = sampled.view(B, self.num_heads, self.head_dim, Q, self.num_points)
-            sampled = sampled.permute(0, 3, 1, 4, 2)  # [B, Q, num_heads, num_points, head_dim]
-            weighted = (sampled * w_cam.unsqueeze(-1)).sum(dim=3)  # [B, Q, num_heads, head_dim]
-            output = output + weighted
+        # 还原维度: [B, N, num_heads, head_dim, Q, num_points]
+        sampled = sampled.view(B, N, self.num_heads, self.head_dim, Q, self.num_points)
+        # → [B, Q, N, num_heads, num_points, head_dim]
+        sampled = sampled.permute(0, 4, 1, 2, 5, 3)
+        # attn_weights: [B, Q, N, num_heads, num_points] → 加权求和
+        weighted = (sampled * attn_weights.unsqueeze(-1)).sum(dim=4)  # [B, Q, N, num_heads, head_dim]
+        output = weighted.sum(dim=2)  # [B, Q, num_heads, head_dim] (对 N 个相机求和)
 
         output = output.view(B, Q, C)
         output = self.output_proj(output)
@@ -683,7 +693,7 @@ def build_model(config=None):
 
 
 --------------------------------------------------------------------------------
-文件: image_encoder.py (120 行)
+文件: image_encoder.py (112 行)
 --------------------------------------------------------------------------------
 """
 图像编码器
@@ -772,15 +782,6 @@ class ImageEncoder(nn.Module):
         ])
         self.norm = nn.LayerNorm(config.embed_dim)
 
-    def _process_single_camera(self, x, rays=None):
-        """x: [B, 1, H, W, C] → [B, H, W, C]"""
-        x = x.squeeze(1)
-        if rays is not None:
-            x = x + rays.squeeze(1)
-        for block in self.blocks:
-            x = block(x)
-        return x
-
     def forward(self, x, intrinsics=None, extrinsics=None):
         """
         x: [B, N, C, H, W]  N=2
@@ -794,21 +795,22 @@ class ImageEncoder(nn.Module):
 
         x = x.permute(0, 1, 3, 4, 2)  # [B, N, H, W, C]
 
-        outs = []
-        for i in range(N):
-            x_cam = x[:, i:i + 1]
-            ray_cam = ray_feat[:, i:i + 1] if ray_feat is not None else None
-            out_cam = self._process_single_camera(x_cam, ray_cam)
-            outs.append(out_cam)
+        # N 个相机合并到 batch 维度并行处理 (共享参数, 消除 Python for 循环)
+        if ray_feat is not None:
+            x = x + ray_feat
+        x = x.reshape(B * N, H, W, C)  # [B*N, H, W, C]
 
-        x = torch.stack(outs, dim=1)  # [B, N, H, W, C]
+        for block in self.blocks:
+            x = block(x)
+
+        x = x.view(B, N, H, W, C)
         x = self.norm(x)
         x = x.permute(0, 1, 4, 2, 3)  # [B, N, C, H, W]
         return x
 
 
 --------------------------------------------------------------------------------
-文件: inference.py (161 行)
+文件: inference.py (165 行)
 --------------------------------------------------------------------------------
 """
 推理脚本
@@ -839,7 +841,11 @@ class StereoOccInference:
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.config = ckpt.get('config', StereoOccConfig())
         self.model = build_model(self.config).to(self.device)
-        self.model.load_state_dict(ckpt['model'])
+        missing, unexpected = self.model.load_state_dict(ckpt['model'], strict=False)
+        if missing:
+            print(f'[推理] 缺失键 (使用默认值): {missing}')
+        if unexpected:
+            print(f'[推理] 多余键 (忽略): {unexpected}')
         self.model.eval()
         print(f'[推理] 模型加载: {checkpoint_path}')
         print(f'[推理] 设备: {self.device}, 参数: {self.model.get_num_params() / 1e6:.2f}M')
@@ -974,7 +980,7 @@ if __name__ == '__main__':
 
 
 --------------------------------------------------------------------------------
-文件: loss.py (78 行)
+文件: loss.py (83 行)
 --------------------------------------------------------------------------------
 """
 占用损失函数
@@ -1016,6 +1022,11 @@ class OccupancyLoss(nn.Module):
         return {'total': total_loss, 'ce': ce_loss, 'lovasz': lovasz_loss}
 
     def _lovasz_softmax(self, pred, target):
+        """Lovasz-Softmax, 强制 FP32 避免 AMP FP16 下 softmax+sort 精度损失"""
+        with torch.amp.autocast('cuda', enabled=False):
+            return self._lovasz_softmax_fp32(pred.float(), target)
+
+    def _lovasz_softmax_fp32(self, pred, target):
         B, C, X, Y, Z = pred.shape
         prob = F.softmax(pred, dim=1)
         prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)
@@ -1057,7 +1068,7 @@ class OccupancyLoss(nn.Module):
 
 
 --------------------------------------------------------------------------------
-文件: occ_decoder.py (153 行)
+文件: occ_decoder.py (165 行)
 --------------------------------------------------------------------------------
 """
 占用解码器
@@ -1168,7 +1179,19 @@ class OccupancyDecoder(nn.Module):
         cx, cy, cz = self.config.coarse_size
 
         # 预计算外参逆矩阵 (所有 decoder 层共享, 避免重复求逆)
-        inv_extrinsics = torch.inverse(extrinsics) if extrinsics is not None else None
+        # 外参是刚体变换, 用解析公式: R_inv = R^T, t_inv = -R^T @ t
+        # 比 torch.inverse() 更快且 FP16 下数值更稳定
+        if extrinsics is not None:
+            R = extrinsics[..., :3, :3]            # [B, N, 3, 3]
+            t = extrinsics[..., :3, 3:]            # [B, N, 3, 1]
+            R_inv = R.transpose(-1, -2)            # [B, N, 3, 3]
+            t_inv = -torch.matmul(R_inv, t)        # [B, N, 3, 1]
+            inv_extrinsics = torch.zeros_like(extrinsics)
+            inv_extrinsics[..., :3, :3] = R_inv
+            inv_extrinsics[..., :3, 3:] = t_inv
+            inv_extrinsics[..., 3, 3] = 1.0
+        else:
+            inv_extrinsics = None
 
         # --- 粗阶段 ---
         query = self.coarse_query.expand(B, -1, -1) + self.coarse_pos.unsqueeze(0)
@@ -1640,7 +1663,7 @@ class TemporalFusionModule(nn.Module):
         grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)
 
         aligned_vol = F.grid_sample(
-            mem_vol, grid_warped, mode='bilinear', padding_mode='zeros', align_corners=True,
+            mem_vol, grid_warped, mode='bilinear', padding_mode='zeros', align_corners=False,
         )
         aligned = aligned_vol.permute(0, 3, 4, 2, 1).reshape(B, Q, C)
         return aligned
@@ -1774,7 +1797,7 @@ if __name__ == '__main__':
 
 
 --------------------------------------------------------------------------------
-文件: train.py (239 行)
+文件: train.py (251 行)
 --------------------------------------------------------------------------------
 """
 训练脚本
@@ -1971,8 +1994,18 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
     if args.resume:
-        model.load_state_dict(ckpt['model'])
+        missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
+        if missing:
+            print(f'缺失键 (使用默认值): {missing}')
+        if unexpected:
+            print(f'多余键 (忽略): {unexpected}')
         optimizer.load_state_dict(ckpt['optimizer'])
+        if 'scheduler' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler'])
+            print("已恢复 scheduler 状态")
+        if 'scaler' in ckpt:
+            scaler.load_state_dict(ckpt['scaler'])
+            print("已恢复 scaler 状态")
         start_epoch = ckpt['epoch'] + 1
         print(f"从 epoch {start_epoch - 1} 恢复成功")
 
@@ -2007,6 +2040,8 @@ def main():
                 'epoch': epoch,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
                 'loss': val_loss,
                 'config': config,
             }, os.path.join(args.output_dir, 'best_model.pth'))
