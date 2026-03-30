@@ -2,39 +2,53 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## ⚠️ 最高优先级规则：Python 环境限制
+## ⚠️ 最高优先级规则：两套 Python 环境
 
-**🔴 严禁使用本地系统 Python！必须使用 Isaac Sim 内置 Python**
+本项目有**两套完全独立的 Python 环境**，必须根据脚本类型选择正确的环境：
 
-本项目运行在 **Windows Isaac Lab** 环境，唯一可用的 Python 解释器路径：
-```
-D:\code\IsaacLab\_isaac_sim\python.bat
-```
+### 环境 1: Isaac Sim 内置 Python（仿真/数据采集）
 
-### 🚫 绝对禁止的操作
-- ❌ `python script.py` - 使用系统 Python
-- ❌ `pip install package` - 使用系统 pip  
-- ❌ `conda activate` - 使用 conda 环境
-- ❌ 在 CMD/PowerShell 中直接运行 Python 脚本
+用于 `import isaacsim` / `import omni` / `import pxr` 的脚本。
 
-### ✅ 唯一正确的操作方式
 ```bat
-# 运行脚本
+# 运行仿真脚本
 isaaclab.bat -p <脚本路径>
-
-# 安装包
-isaaclab.bat -p -m pip install <包名>
 
 # 直接使用 Isaac Sim Python
 D:\code\IsaacLab\_isaac_sim\python.bat <脚本路径>
-D:\code\IsaacLab\_isaac_sim\python.bat -m pip install <包名>
 
-# 检查包
+# 安装包 / 检查包
+isaaclab.bat -p -m pip install <包名>
 isaaclab.bat -p -m pip list
 ```
 
-### 📋 原因说明
-Isaac Sim 的 C++ 扩展模块与内置 Python 3.11.13 紧密绑定，使用其他 Python 环境会导致 DLL 加载失败和运行时错误。
+**原因**: Isaac Sim 的 C++ 扩展模块与内置 Python 3.11.13 紧密绑定，使用其他环境会 DLL 加载失败。
+
+### 环境 2: Conda `carla` 环境（神经网络训练/推理）
+
+用于 `import torch` 的纯 PyTorch 脚本（不依赖 Isaac Sim）。
+
+```bat
+# 直接用 python.exe 绝对路径运行（不需要 conda activate）
+C:\ProgramData\anaconda3\envs\carla\python.exe <脚本路径>
+
+# 示例: 训练
+C:\ProgramData\anaconda3\envs\carla\python.exe projects/stereo_e2e_occ/train.py --data_root ... --amp
+
+# 示例: 验证网络 shape
+C:\ProgramData\anaconda3\envs\carla\python.exe projects/stereo_e2e_occ/verify_shapes.py
+```
+
+### 🚫 绝对禁止
+- ❌ `python script.py` - 使用系统 Python（两套都不是）
+- ❌ 用 Isaac Sim Python 运行 PyTorch 训练脚本
+- ❌ 用 conda carla 运行 Isaac Sim 仿真脚本
+
+### 判断规则
+| 脚本 import | 使用环境 | 运行方式 |
+|-------------|----------|----------|
+| `isaacsim`, `omni`, `pxr`, `carb` | Isaac Sim Python | `isaaclab.bat -p` |
+| `torch`, 纯 PyTorch | Conda carla | `C:\ProgramData\anaconda3\envs\carla\python.exe` |
 
 ## 沟通语言
 
@@ -47,30 +61,10 @@ Isaac Lab is a GPU-accelerated robotics simulation framework built on NVIDIA Isa
 
 ## Python 环境说明（重复强调）
 
-**再次强调：本项目只能使用 Isaac Sim 内置 Python**
-```
-D:\code\IsaacLab\_isaac_sim\python.bat
-```
+**再次强调：两套环境，按脚本类型选择。详见上方"最高优先级规则"。**
 
-### 安装包
-```bat
-:: 推荐方式
-isaaclab.bat -p -m pip install <包名>
-
-:: 直接方式
-D:\code\IsaacLab\_isaac_sim\python.bat -m pip install <包名>
-```
-
-### 运行脚本
-```bat
-isaaclab.bat -p <脚本路径>
-```
-
-### 检查包
-```bat
-isaaclab.bat -p -m pip list
-isaaclab.bat -p -c "import <包名>; print('OK')"
-```
+- **仿真脚本** → `isaaclab.bat -p <脚本>`
+- **PyTorch 训练** → `C:\ProgramData\anaconda3\envs\carla\python.exe <脚本>`
 
 ## Common Commands
 

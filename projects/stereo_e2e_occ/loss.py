@@ -1,0 +1,78 @@
+"""
+占用损失函数
+
+CE + Lovasz-Softmax (与参考版相同)
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class OccupancyLoss(nn.Module):
+    def __init__(self, num_classes=18, ignore_index=255, lovasz_weight=0.5):
+        super().__init__()
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.lovasz_weight = lovasz_weight
+
+    def forward(self, pred, target):
+        """
+        pred: [B, C, X, Y, Z]  raw logits
+        target: [B, X, Y, Z]  uint8 class ids
+        """
+        B, C, X, Y, Z = pred.shape
+        pred_flat = pred.permute(0, 2, 3, 4, 1).reshape(-1, C)
+        target_flat = target.reshape(-1)
+
+        valid_mask = target_flat != self.ignore_index
+        pred_valid = pred_flat[valid_mask]
+        target_valid = target_flat[valid_mask]
+
+        if pred_valid.numel() == 0:
+            zero = torch.tensor(0.0, device=pred.device)
+            return {'total': zero, 'ce': zero, 'lovasz': zero}
+
+        ce_loss = F.cross_entropy(pred_valid, target_valid)
+        lovasz_loss = self._lovasz_softmax(pred, target)
+        total_loss = ce_loss + self.lovasz_weight * lovasz_loss
+        return {'total': total_loss, 'ce': ce_loss, 'lovasz': lovasz_loss}
+
+    def _lovasz_softmax(self, pred, target):
+        B, C, X, Y, Z = pred.shape
+        prob = F.softmax(pred, dim=1)
+        prob_flat = prob.permute(1, 0, 2, 3, 4).reshape(C, -1)
+        target_flat = target.reshape(-1)
+
+        valid_mask = target_flat != self.ignore_index
+        prob_flat = prob_flat[:, valid_mask]
+        target_flat = target_flat[valid_mask]
+
+        if target_flat.numel() == 0:
+            return torch.tensor(0.0, device=pred.device)
+
+        # 只遍历实际存在的类 (避免对空类做无用排序)
+        present_classes = target_flat.unique()
+        loss_per_class = []
+        for c in present_classes:
+            if c == self.ignore_index:
+                continue
+            fg = (target_flat == c).float()
+            errors = (fg - prob_flat[c]).abs()
+            errors_sorted, perm = torch.sort(errors, descending=True)
+            fg_sorted = fg[perm]
+            grad = self._lovasz_grad(fg_sorted)
+            loss_per_class.append((errors_sorted * grad).sum())
+
+        if len(loss_per_class) == 0:
+            return torch.tensor(0.0, device=pred.device)
+        return torch.stack(loss_per_class).mean()
+
+    def _lovasz_grad(self, gt_sorted):
+        n = len(gt_sorted)
+        gts = gt_sorted.sum()
+        intersection = gts - gt_sorted.cumsum(0)
+        union = gts + (1 - gt_sorted).cumsum(0)
+        jaccard = 1.0 - intersection / (union + 1e-6)
+        if n > 1:
+            jaccard[1:] = jaccard[1:] - jaccard[:-1]
+        return jaccard
