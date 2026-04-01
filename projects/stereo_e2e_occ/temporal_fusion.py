@@ -105,7 +105,15 @@ class TemporalFusionModule(nn.Module):
         grid_flat = grid_homo.view(B, -1, 4)
 
         grid_flat_world = grid_flat * scale + offset
-        T_inv = torch.linalg.inv(ego_motion)
+        # 解析刚体求逆 (避免 torch.linalg.inv, TensorRT 不支持)
+        R = ego_motion[:, :3, :3]
+        t = ego_motion[:, :3, 3:]
+        R_inv = R.transpose(-1, -2)
+        t_inv = -torch.bmm(R_inv, t)
+        T_inv = torch.zeros_like(ego_motion)
+        T_inv[:, :3, :3] = R_inv
+        T_inv[:, :3, 3:] = t_inv
+        T_inv[:, 3, 3] = 1.0
         grid_warped_world = torch.bmm(grid_flat_world, T_inv.transpose(1, 2))
         grid_warped_norm = (grid_warped_world - offset) / scale
         grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)

@@ -4,7 +4,7 @@
 
 统计信息:
   文件数: 17
-  总行数: 2305
+  总行数: 2313
 
 ================================================================================
 文件结构
@@ -23,7 +23,7 @@ stereo_e2e_occ/
 ├── position_encoding.py  (163 行)
 ├── prepare_splits.py  (69 行)
 ├── raw_embed.py  (63 行)
-├── temporal_fusion.py  (137 行)
+├── temporal_fusion.py  (145 行)
 ├── test.py  (102 行)
 ├── train.py  (251 行)
 ├── verify_shapes.py  (298 行)
@@ -1548,7 +1548,7 @@ class StereoPatchEmbed(nn.Module):
 
 
 --------------------------------------------------------------------------------
-文件: temporal_fusion.py (137 行)
+文件: temporal_fusion.py (145 行)
 --------------------------------------------------------------------------------
 """
 时序融合模块
@@ -1657,7 +1657,15 @@ class TemporalFusionModule(nn.Module):
         grid_flat = grid_homo.view(B, -1, 4)
 
         grid_flat_world = grid_flat * scale + offset
-        T_inv = torch.linalg.inv(ego_motion)
+        # 解析刚体求逆 (避免 torch.linalg.inv, TensorRT 不支持)
+        R = ego_motion[:, :3, :3]
+        t = ego_motion[:, :3, 3:]
+        R_inv = R.transpose(-1, -2)
+        t_inv = -torch.bmm(R_inv, t)
+        T_inv = torch.zeros_like(ego_motion)
+        T_inv[:, :3, :3] = R_inv
+        T_inv[:, :3, 3:] = t_inv
+        T_inv[:, 3, 3] = 1.0
         grid_warped_world = torch.bmm(grid_flat_world, T_inv.transpose(1, 2))
         grid_warped_norm = (grid_warped_world - offset) / scale
         grid_warped = grid_warped_norm[..., :3].view(B, D, H, W, 3)
