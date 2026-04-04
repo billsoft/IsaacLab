@@ -142,10 +142,10 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
 
     if not use_npc:
         if args.no_npc:
-            print("[capture_v2] NPC disabled (--no_npc)")
+            print("[capture_dataset] NPC disabled (--no_npc)")
         else:
-            print("[capture_v2] No NPC models found")
-        print(f"[capture_v2] Loading scene: {scene_usd}")
+            print("[capture_dataset] No NPC models found")
+        print(f"[capture_dataset] Loading scene: {scene_usd}")
         stage = omni.usd.get_context().get_stage()
         stage.GetRootLayer().subLayerPaths.append(scene_usd)
         for _ in range(30):
@@ -153,7 +153,7 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         return False, 0
 
     num_chars = min(args.num_characters, len(available_models))
-    print(f"[capture_v2] Found {len(available_models)} NPC model(s), using {num_chars}")
+    print(f"[capture_dataset] Found {len(available_models)} NPC model(s), using {num_chars}")
 
     # 启用 NPC 扩展
     NPC_EXTENSIONS = [
@@ -161,13 +161,13 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         "omni.anim.retarget.core", "omni.anim.navigation.core",
         "omni.anim.navigation.bundle", "omni.anim.people", "omni.kit.scripting",
     ]
-    print("[capture_v2] Enabling NPC extensions...")
+    print("[capture_dataset] Enabling NPC extensions...")
     for ext in NPC_EXTENSIONS:
         enable_extension(ext)
         simulation_app.update()
 
     # 手动打开场景，等待 ASSETS_LOADED
-    print(f"[capture_v2] Pre-loading scene: {scene_usd}")
+    print(f"[capture_dataset] Pre-loading scene: {scene_usd}")
     scene_loaded = [False]
 
     def on_scene_loaded(e):
@@ -177,7 +177,7 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         event_name=omni.usd.get_context().stage_event_name(
             omni.usd.StageEventType.ASSETS_LOADED),
         on_event=on_scene_loaded,
-        observer_name="capture_v2/on_scene_preload",
+        observer_name="capture_dataset/on_scene_preload",
     )
 
     import omni.kit.window.file
@@ -194,15 +194,15 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         simulation_app.update()
         tick += 1
         if tick % 300 == 0:
-            print(f"[capture_v2] Waiting for scene... tick={tick}")
+            print(f"[capture_dataset] Waiting for scene... tick={tick}")
     _handle = None
-    print(f"[capture_v2] Scene loaded after {tick} ticks")
+    print(f"[capture_dataset] Scene loaded after {tick} ticks")
 
     for _ in range(30):
         simulation_app.update()
 
     # IRA setup
-    print(f"[capture_v2] Setting up {num_chars} NPC(s) via IRA...")
+    print(f"[capture_dataset] Setting up {num_chars} NPC(s) via IRA...")
     enable_extension("isaacsim.replicator.agent.core")
     simulation_app.update()
     simulation_app.update()
@@ -234,15 +234,15 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
             simulation_app.update()
             tick += 1
             if tick % 300 == 0:
-                print(f"[capture_v2] Waiting for IRA setup... tick={tick}")
+                print(f"[capture_dataset] Waiting for IRA setup... tick={tick}")
 
         if setup_done[0]:
             npc_ready = True
-            print(f"[capture_v2] {num_chars} NPC(s) loaded after {tick} ticks!")
+            print(f"[capture_dataset] {num_chars} NPC(s) loaded after {tick} ticks!")
         else:
-            print(f"[capture_v2] WARNING: IRA timeout at {tick} ticks")
+            print(f"[capture_dataset] WARNING: IRA timeout at {tick} ticks")
     else:
-        print("[capture_v2] WARNING: Failed to load NPC config")
+        print("[capture_dataset] WARNING: Failed to load NPC config")
 
     for _ in range(30):
         simulation_app.update()

@@ -1,6 +1,6 @@
-"""数据集 v2 完整性验证
-=======================
-检查 capture_v2 输出的所有数据是否符合规范（方向预测.md §6）。
+"""数据集完整性验证
+===================
+检查 capture_dataset 输出的所有数据是否符合规范（方向预测.md §6）。
 
 不需要 Isaac Sim，用任意 Python 运行：
     python validate_dataset_v2.py --data_dir output_v2

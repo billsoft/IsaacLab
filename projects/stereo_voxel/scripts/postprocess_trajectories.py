@@ -291,7 +291,7 @@ def main():
     instance_path = os.path.join(data_dir, "instance_meta.json")
 
     if not os.path.isfile(history_path):
-        print(f"ERROR: {history_path} not found. Run capture_v2/main.py first.")
+        print(f"ERROR: {history_path} not found. Run capture_dataset/main.py first.")
         sys.exit(1)
 
     os.makedirs(traj_dir, exist_ok=True)

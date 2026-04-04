@@ -46,6 +46,7 @@ docker/artifacts/
 *.tmp
 projects/stereo_e2e_occ/checkpoints/*
 projects/stereo_e2e_occ/inference_results/*
+projects/stereo_e2e_occ/inference_results_new/*
 
 
 

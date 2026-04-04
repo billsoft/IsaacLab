@@ -1,5 +1,5 @@
-"""capture_v2 常量定义
-======================
+"""capture_dataset 常量定义
+=========================
 相机参数、NPC 尺寸、资产路径等集中管理。
 """
 
@@ -58,7 +58,7 @@ def resolve_assets_root() -> str:
             return path.replace("\\", "/")
     except Exception:
         pass
-    print("[capture_v2] ERROR: Cannot find Isaac assets.", file=sys.stderr)
+    print("[capture_dataset] ERROR: Cannot find Isaac assets.", file=sys.stderr)
     sys.exit(1)
 
 

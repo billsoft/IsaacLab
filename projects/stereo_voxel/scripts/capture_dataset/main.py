@@ -1,4 +1,4 @@
-"""双目鱼眼 + 语义体素 + Flow + 实例 ID 同步采集 (v2)
+"""双目鱼眼 + 语义体素 + Flow + 实例 ID 同步采集
 ====================================================
 相比 stereo_voxel_capture_dng.py 的改进：
   - 模块化拆分（constants / scene / camera / voxel / npc / flow / io）
@@ -7,9 +7,9 @@
   - 新增 NPC 位置历史（供后处理生成轨迹）
 
 运行：
-    isaaclab.bat -p projects/stereo_voxel/scripts/capture_v2/main.py
-    isaaclab.bat -p projects/stereo_voxel/scripts/capture_v2/main.py --headless --num_frames 200
-    isaaclab.bat -p projects/stereo_voxel/scripts/capture_v2/main.py --no_npc --headless --num_frames 50
+    isaaclab.bat -p projects/stereo_voxel/scripts/capture_dataset/main.py
+    isaaclab.bat -p projects/stereo_voxel/scripts/capture_dataset/main.py --headless --num_frames 200
+    isaaclab.bat -p projects/stereo_voxel/scripts/capture_dataset/main.py --no_npc --headless --num_frames 50
 """
 
 import argparse
@@ -61,26 +61,26 @@ SCRIPTS_DIR = os.path.dirname(SCRIPT_DIR)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-# capture_v2 子模块（延迟到 SimulationApp 之后）
-from capture_v2.constants import (
+# capture_dataset 子模块（延迟到 SimulationApp 之后）
+from capture_dataset.constants import (
     BASELINE_M, CAM_H, CAM_W, DIAG_FOV_DEG, K1_EQUIDISTANT,
     PIXEL_SIZE_UM, FOCAL_LENGTH_MM, SIM_FPS, fx, cx, cy,
     resolve_assets_root,
 )
-from capture_v2.scene_setup import (
+from capture_dataset.scene_setup import (
     probe_scene_objects, setup_scene, suggest_camera_position,
 )
-from capture_v2.camera_setup import (
+from capture_dataset.camera_setup import (
     create_stereo_rig, get_rig_world_pose, setup_annotators,
 )
-from capture_v2.voxel_grid_v2 import VoxelGridV2
-from capture_v2.voxel_filling import (
+from capture_dataset.voxel_grid_v2 import VoxelGridV2
+from capture_dataset.voxel_filling import (
     fill_voxel_grid, get_npc_world_positions, stamp_npc_voxels,
 )
-from capture_v2.instance_registry import InstanceRegistry
-from capture_v2.npc_tracker import NPCTracker
-from capture_v2.flow_generator import fill_flow
-from capture_v2 import async_io
+from capture_dataset.instance_registry import InstanceRegistry
+from capture_dataset.npc_tracker import NPCTracker
+from capture_dataset.flow_generator import fill_flow
+from capture_dataset import async_io
 
 from semantic_classes import PERSON, UNOBSERVED
 from rawcam import RawConverter, DngWriter, SensorConfig, NoiseConfig, OutputConfig
