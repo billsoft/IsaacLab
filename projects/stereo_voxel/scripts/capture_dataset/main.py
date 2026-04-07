@@ -95,7 +95,18 @@ print(f"[v2] SC132GS x2, baseline={BASELINE_M*1000:.0f}mm, FOV={DIAG_FOV_DEG}deg
 # ===========================================================================
 # PHASE 1: 场景 + NPC
 # ===========================================================================
-npc_ready, num_chars = setup_scene(simulation_app, args, ASSETS_ROOT)
+npc_ready, num_chars, sim_manager = setup_scene(simulation_app, args, ASSETS_ROOT)
+
+# 关键修复：必须在 setup_scene 返回后立即启动 IRA 数据生成协程！
+# 参考 stereo_voxel_capture.py 的正确做法：run_coroutine 在相机创建之前调用。
+# 如果延迟到 PHASE 4 才启动，NPC 会因为初始化时序问题而冻结不动。
+_ira_task = None
+if npc_ready and sim_manager is not None:
+    async def _run_ira_data_gen():
+        await sim_manager.run_data_generation_async(will_wait_until_complete=True)
+    from omni.kit.async_engine import run_coroutine
+    _ira_task = run_coroutine(_run_ira_data_gen())
+    print("[v2] ✅ IRA data generation started immediately after setup (NPC GoTo commands active)")
 
 # ===========================================================================
 # PHASE 2: 双目相机
@@ -141,7 +152,7 @@ npc_tracker = NPCTracker(sim_fps=SIM_FPS)
 
 # rawcam DNG 管线
 OUTPUT_DIR = args.output_dir or os.path.join(
-    os.path.dirname(SCRIPTS_DIR), "output_v2")
+    os.path.dirname(SCRIPTS_DIR), "output_dng")
 LEFT_DIR = os.path.join(OUTPUT_DIR, "left")
 RIGHT_DIR = os.path.join(OUTPUT_DIR, "right")
 LEFT_DNG_DIR = os.path.join(OUTPUT_DIR, "left_dng")
@@ -209,12 +220,22 @@ def capture_frame(frame_id: int, sim_step: int) -> bool:
     timeline = omni.timeline.get_timeline_interface()
     frame_str = f"frame_{frame_id:06d}"
 
-    # 1. 冻结
+    # 1. 冻结虚拟世界（图像/位置/体素精确同步）
     timeline.pause()
     for _ in range(3):
         simulation_app.update()
 
-    # 2. 双目图像
+    # 诊断：对比 pause 前（通过 update 获取）和 pause 后的 NPC Xform
+    from pxr import UsdGeom
+    _diag_before = []
+    for _i in range(3):
+        _p = stage.GetPrimAtPath(f"/Root/Character_{_i}")
+        if _p.IsValid():
+            _m = UsdGeom.Xformable(_p).ComputeLocalToWorldTransform(0)
+            _t = _m.ExtractTranslation()
+            _diag_before.append((_t[0] * stage_mpu, _t[1] * stage_mpu))
+
+    # 2. 双目图像（与冻结瞬间同步）
     data_l = annot_left.get_data()
     data_r = annot_right.get_data()
     if data_l is None or data_r is None:
@@ -239,6 +260,17 @@ def capture_frame(frame_id: int, sim_step: int) -> bool:
 
     # 4. NPC 位置 + 朝向追踪
     npc_positions, npc_orientations = npc_tracker.update(stage, stage_mpu, sim_step)
+
+    # 诊断：对比 pause 后立即读取 vs get_npc_world_positions 读取的位置
+    if frame_id % 10 == 0 and _diag_before:
+        _diag_after = [(p[0], p[1]) for p in npc_positions]
+        for _i in range(min(len(_diag_before), len(_diag_after))):
+            _dx = _diag_after[_i][0] - _diag_before[_i][0]
+            _dy = _diag_after[_i][1] - _diag_before[_i][1]
+            _same = abs(_dx) < 0.001 and abs(_dy) < 0.001
+            print(f"  [DIAG] NPC{_i}: before=({_diag_before[_i][0]:.2f},{_diag_before[_i][1]:.2f}) "
+                  f"after=({_diag_after[_i][0]:.2f},{_diag_after[_i][1]:.2f}) "
+                  f"Δ=({_dx:.4f},{_dy:.4f}) {'SAME' if _same else 'MOVED'}")
 
     # 5. 体素填充（PhysX 静态物体）
     vg = VoxelGridV2()
@@ -299,14 +331,32 @@ def capture_frame(frame_id: int, sim_step: int) -> bool:
     async_io.async_save_json(
         os.path.join(META_DIR, f"{frame_str}.json"), meta)
 
-    # 10. 日志
-    if frame_id % 5 == 0:
-        occ = int(np.sum((vg.semantic > 0) & (vg.semantic < UNOBSERVED)))
-        person_ct = int(np.sum(vg.semantic == PERSON))
-        flow_ct = int(vg.flow_mask.sum())
-        print(f"  Frame {frame_id}: L={rgb_l.mean():.0f} R={rgb_r.mean():.0f} "
-              f"occ={occ} person={person_ct} flow={flow_ct} "
-              f"npc={len(npc_positions)} t={timestamp_sec:.1f}s")
+    # 10. 日志（不刷屏：第 0 帧详细，之后每 10 帧一行摘要）
+    occ = int(np.sum((vg.semantic > 0) & (vg.semantic < UNOBSERVED)))
+    person_ct = int(np.sum(vg.semantic == PERSON))
+    flow_ct = int(vg.flow_mask.sum())
+
+    if frame_id == 0:
+        # 首帧：详细输出 NPC 位置，帮助诊断
+        print(f"  Frame 0: L={rgb_l.mean():.0f} R={rgb_r.mean():.0f} "
+              f"occ={occ} person={person_ct} flow={flow_ct}")
+        for ni, np_ in enumerate(npc_positions):
+            rel = np_ - np.array([cam_pos[0], cam_pos[1], 0.0])
+            in_range = abs(rel[0]) <= 3.6 and abs(rel[1]) <= 3.0
+            tag = "OK" if in_range else "OUT"
+            print(f"    NPC{ni}: world=({np_[0]:.2f},{np_[1]:.2f}) "
+                  f"rel=({rel[0]:.2f},{rel[1]:.2f}) [{tag}]")
+        # 记录首帧语义哈希用于后续对比
+        capture_frame._prev_sem_hash = hash(vg.semantic.tobytes())
+    elif frame_id % 10 == 0:
+        # 每 10 帧：摘要 + 体素是否有变化
+        cur_hash = hash(vg.semantic.tobytes())
+        changed = cur_hash != getattr(capture_frame, '_prev_sem_hash', None)
+        capture_frame._prev_sem_hash = cur_hash
+        npc_pos_str = " ".join(f"({p[0]:.1f},{p[1]:.1f})" for p in npc_positions[:3])
+        print(f"  Frame {frame_id}: occ={occ} person={person_ct} "
+              f"voxΔ={'YES' if changed else 'NO'} "
+              f"npc=[{npc_pos_str}] t={timestamp_sec:.1f}s")
 
     # 11. 恢复
     timeline.play()
@@ -314,8 +364,9 @@ def capture_frame(frame_id: int, sim_step: int) -> bool:
 
 
 # ===========================================================================
-# PHASE 4: 主循环
+# PHASE 4: 主循环 (IRA 协程已在 PHASE 1 后启动)
 # ===========================================================================
+
 frame_id = 0
 warmup_steps = 30
 timeline = omni.timeline.get_timeline_interface()
@@ -325,6 +376,14 @@ if args.headless:
     timeline.play()
     for _ in range(warmup_steps):
         simulation_app.update()
+    # warmup 后诊断：IRA 是否激活，NPC 初始位置
+    if _ira_task is not None:
+        print(f"[v2] IRA task status after warmup: done={_ira_task.done()}")
+    from capture_dataset.voxel_filling import get_npc_world_positions as _probe_npc
+    _probe_pos = _probe_npc(stage, UsdGeom.GetStageMetersPerUnit(stage))
+    print(f"[v2] NPC probe after warmup: {len(_probe_pos)} NPCs")
+    for _i, _p in enumerate(_probe_pos):
+        print(f"  NPC{_i}: ({_p[0]:.2f}, {_p[1]:.2f}, {_p[2]:.2f})m")
 
     captured = 0
     max_steps = args.num_frames * args.capture_interval * 3
@@ -362,6 +421,9 @@ else:
         sim_step += 1
         if captured >= args.num_frames:
             continue
+        # 检查 IRA 协程是否已结束
+        if _ira_task is not None and _ira_task.done() and captured < args.num_frames:
+            print(f"[v2] IRA finished after {captured} frames (target: {args.num_frames})")
         if sim_step % args.capture_interval == 0:
             if capture_frame(frame_id, sim_step):
                 frame_id += 1

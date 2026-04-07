@@ -195,34 +195,78 @@ def fill_voxel_grid(stage, voxel_grid, world_centers_flat, physx_sqi,
 # ===========================================================================
 # NPC 位置检测
 # ===========================================================================
+def _find_skelroot(character_prim):
+    """在 Character 根 prim 下查找 SkelRoot 子节点。
+
+    IRA NPC 结构:
+      /World/Characters/Character_XX  (根 Xform - 静态生成位置，不更新)
+        └── <model_name>              (SkelRoot - 由 omni.anim.people 动画驱动，位置持续更新)
+
+    Returns:
+        SkelRoot prim（若找到），否则返回原始 prim 作为回退。
+    """
+    from pxr import Usd
+    for prim in Usd.PrimRange(character_prim):
+        if prim.GetTypeName() == "SkelRoot":
+            return prim
+    return character_prim
+
+
 def get_npc_world_positions(stage, stage_mpu: float) -> list[np.ndarray]:
     """获取所有 NPC Character 的世界位置（米）。
+
+    IRA 动画 NPC 无 PhysX 刚体，只能从 USD 读取。
+    尝试多种方式获取位置以提高兼容性。
 
     Returns:
         list of np.array(3,): 每个 NPC 脚底世界坐标 [x, y, z]
     """
-    from pxr import UsdGeom
+    from pxr import UsdGeom, Gf, Usd
 
     positions = []
     chars_prim = stage.GetPrimAtPath("/World/Characters")
     if not chars_prim.IsValid():
-        return positions
+        chars_prim = stage.GetPrimAtPath("/Root")
+        if not chars_prim.IsValid():
+            return positions
+
+    time_code = Usd.TimeCode.Default()
 
     for child in chars_prim.GetChildren():
         name = child.GetName()
         if not name.startswith("Character"):
             continue
-        xformable = UsdGeom.Xformable(child)
+        # IRA 动画更新的是 SkelRoot 子节点，不是根 Xform
+        target_prim = _find_skelroot(child)
+        xformable = UsdGeom.Xformable(target_prim)
         try:
-            xf = xformable.ComputeLocalToWorldTransform(0)
+            # 方法 1: ComputeLocalToWorldTransform (标准方式)
+            xf = xformable.ComputeLocalToWorldTransform(time_code)
             pos = xf.ExtractTranslation()
-            positions.append(np.array([
-                pos[0] * stage_mpu,
-                pos[1] * stage_mpu,
-                pos[2] * stage_mpu,
-            ]))
         except Exception:
-            continue
+            # 方法 2: 使用 BBoxCache 获取世界包围盒 (更准确，包含骨骼)
+            try:
+                bbox_cache = UsdGeom.BBoxCache(
+                    time_code,
+                    [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+                    False
+                )
+                bounds = xformable.ComputeWorldBound(time_code, UsdGeom.Tokens.default_)
+                range_vec = bounds.GetRange().GetSize()
+                pos = Gf.Vec3d(
+                    bounds.GetRange().GetMin()[0] + range_vec[0] / 2,
+                    bounds.GetRange().GetMin()[1] + range_vec[1] / 2,
+                    bounds.GetRange().GetMin()[2]
+                )
+            except Exception as e:
+                print(f"[voxel] Warning: 无法获取 {name} 位置: {e}")
+                continue
+
+        positions.append(np.array([
+            pos[0] * stage_mpu,
+            pos[1] * stage_mpu,
+            pos[2] * stage_mpu,
+        ]))
     return positions
 
 
@@ -243,7 +287,8 @@ def get_npc_world_orientations(stage, stage_mpu: float) -> list[np.ndarray]:
         name = child.GetName()
         if not name.startswith("Character"):
             continue
-        xformable = UsdGeom.Xformable(child)
+        target_prim = _find_skelroot(child)
+        xformable = UsdGeom.Xformable(target_prim)
         try:
             xf = xformable.ComputeLocalToWorldTransform(0)
             rot = xf.ExtractRotationQuat()

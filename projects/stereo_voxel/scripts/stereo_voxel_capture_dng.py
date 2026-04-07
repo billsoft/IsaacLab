@@ -149,11 +149,18 @@ def get_npc_world_positions(stage, stage_mpu):
     if not chars_prim.IsValid():
         return npc_positions
 
+    from pxr import Usd as _Usd
     for child in chars_prim.GetChildren():
         name = child.GetName()
         if not name.startswith("Character"):
             continue
-        xformable = _UsdGeom.Xformable(child)
+        # IRA 动画更新的是 SkelRoot 子节点，不是根 Xform
+        target = child
+        for p in _Usd.PrimRange(child):
+            if p.GetTypeName() == "SkelRoot":
+                target = p
+                break
+        xformable = _UsdGeom.Xformable(target)
         try:
             xf = xformable.ComputeLocalToWorldTransform(0)
             pos = xf.ExtractTranslation()
@@ -706,7 +713,18 @@ if use_npc:
 
     for _ in range(30):
         simulation_app.update()
+
+    # 关键修复：必须启动 IRA 数据生成才能激活 NPC GoTo 命令执行
+    if npc_ready:
+        async def _run_ira():
+            await sim_manager.run_data_generation_async(will_wait_until_complete=True)
+        from omni.kit.async_engine import run_coroutine
+        _ira_task = run_coroutine(_run_ira())
+        print("[Capture] IRA data generation started (NPC GoTo commands active)")
+    else:
+        _ira_task = None
 else:
+    _ira_task = None
     if args.no_npc:
         print("[Capture] NPC disabled (--no_npc)")
     else:

@@ -124,11 +124,12 @@ def generate_npc_config_file(num_characters: int, command_file: str,
 # ===========================================================================
 # 场景 + NPC 初始化（Phase 1 完整封装）
 # ===========================================================================
-def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
+def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int, object]:
     """加载场景并初始化 NPC。
 
     Returns:
-        (npc_ready, num_chars)
+        (npc_ready, num_chars, sim_manager_or_None)
+        sim_manager 需在主循环前调用 run_data_generation_async() 来驱动 NPC GoTo 命令。
     """
     import carb
     import omni.kit.app
@@ -150,7 +151,7 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         stage.GetRootLayer().subLayerPaths.append(scene_usd)
         for _ in range(30):
             simulation_app.update()
-        return False, 0
+        return False, 0, None
 
     num_chars = min(args.num_characters, len(available_models))
     print(f"[capture_dataset] Found {len(available_models)} NPC model(s), using {num_chars}")
@@ -230,21 +231,30 @@ def setup_scene(simulation_app, args, assets_root: str) -> tuple[bool, int]:
         sim_manager.set_up_simulation_from_config_file()
 
         tick = 0
-        while not setup_done[0] and not simulation_app.is_exiting() and tick < 3000:
+        while not setup_done[0] and not simulation_app.is_exiting() and tick < 6000:
             simulation_app.update()
             tick += 1
-            if tick % 300 == 0:
+            if tick % 500 == 0:
                 print(f"[capture_dataset] Waiting for IRA setup... tick={tick}")
+                try:
+                    import omni.anim.navigation.core as nav_core
+                    nav_settings = carb.settings.get_settings()
+                    navmesh_enabled = nav_settings.get("/exts/omni.anim.people/navigation_settings/navmesh_enabled")
+                    print(f"[capture_dataset]   NavMesh enabled: {navmesh_enabled}")
+                except Exception as e:
+                    print(f"[capture_dataset]   NavMesh query failed: {e}")
 
         if setup_done[0]:
             npc_ready = True
             print(f"[capture_dataset] {num_chars} NPC(s) loaded after {tick} ticks!")
         else:
-            print(f"[capture_dataset] WARNING: IRA timeout at {tick} ticks")
+            print(f"[capture_dataset] WARNING: IRA setup_done callback not fired after {tick} ticks")
+            print(f"[capture_dataset]   NPCs may still exist - will attempt to start data generation anyway")
+            npc_ready = True  # 容错：即使回调没触发，NPC 可能已创建
     else:
         print("[capture_dataset] WARNING: Failed to load NPC config")
 
     for _ in range(30):
         simulation_app.update()
 
-    return npc_ready, num_chars
+    return npc_ready, num_chars, sim_manager if npc_ready else None

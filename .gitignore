@@ -88,5 +88,9 @@ Environments/
 *.png
 *.dng
 *.jpg
-projects/stereo_voxel/output_dng/*
+projects/stereo_voxel/output_dng/
+projects/stereo_voxel/output_v2/
+projects/stereo_voxel/output_dng_old/
+projects/stereo_voxel/**/*.npz
+projects/stereo_voxel/**/*.npz.*
 
