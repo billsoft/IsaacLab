@@ -146,6 +146,18 @@ class StereoOccDataset(Dataset):
 
         return torch.zeros(1, *self.image_size)
 
+    def _load_png(self, path):
+        """加载 PNG 图像 (RGB), 转灰度归一化到 [0, 1]"""
+        try:
+            from PIL import Image
+            img = Image.open(path)
+            img_gray = img.convert('L')  # RGB → 灰度
+            img_np = np.array(img_gray).astype(np.float32) / 255.0
+            return torch.from_numpy(img_np[np.newaxis, :, :])  # [1, H, W]
+        except Exception as e:
+            print(f"[WARN] Failed to load PNG {path}: {e}")
+            return torch.zeros(1, *self.image_size)
+
     def _load_voxel(self, frame_id):
         """加载体素语义标签 (72, 60, 32) uint8"""
         npz_path = os.path.join(self.data_root, 'voxel', f'{frame_id}_semantic.npz')
@@ -235,11 +247,19 @@ class StereoOccDataset(Dataset):
     def _load_single_frame(self, idx):
         frame_id = self.frames[idx]
 
-        # 1. 双目图像 [2, 1, H, W]
-        left_path = os.path.join(self.data_root, 'left_dng', f'{frame_id}.dng')
-        right_path = os.path.join(self.data_root, 'right_dng', f'{frame_id}.dng')
-        left_img = self._load_dng(left_path)
-        right_img = self._load_dng(right_path)
+        # 1. 双目图像 [2, 1, H, W] - 优先尝试 PNG，再尝试 DNG
+        left_path_png = os.path.join(self.data_root, 'left', f'{frame_id}.png')
+        right_path_png = os.path.join(self.data_root, 'right', f'{frame_id}.png')
+        left_path_dng = os.path.join(self.data_root, 'left_dng', f'{frame_id}.dng')
+        right_path_dng = os.path.join(self.data_root, 'right_dng', f'{frame_id}.dng')
+
+        if os.path.exists(left_path_png) and os.path.exists(right_path_png):
+            left_img = self._load_png(left_path_png)
+            right_img = self._load_png(right_path_png)
+        else:
+            left_img = self._load_dng(left_path_dng)
+            right_img = self._load_dng(right_path_dng)
+
         images = torch.stack([left_img, right_img], dim=0)  # [2, 1, H, W]
 
         # 2. 体素标签 [X, Y, Z]

@@ -199,12 +199,18 @@ def main():
     print()
 
     with torch.no_grad():
-        logits = head(voxel_feats)
-    info("head logits", logits)
+        outputs = head(voxel_feats)
+    info("head semantic", outputs['semantic'])
+    if 'flow' in outputs:
+        info("head flow", outputs['flow'])
+    if 'orientation' in outputs:
+        info("head orientation", outputs['orientation'])
+    if 'angular_vel' in outputs:
+        info("head angular_vel", outputs['angular_vel'])
     gpu_mem("after head")
 
     expected_logits = (B, config.num_classes, vx, vy, vz)
-    assert logits.shape == expected_logits, f"期望 {expected_logits}, 得到 {list(logits.shape)}"
+    assert outputs['semantic'].shape == expected_logits, f"期望 {expected_logits}, 得到 {list(outputs['semantic'].shape)}"
 
     # =====================================================================
     sep("7. Loss 计算")
@@ -215,10 +221,20 @@ def main():
     target[mask] = config.ignore_index
     info("target (含 ignore)", target)
 
-    losses = criterion(logits, target)
+    flow_target   = torch.randn(B, 2, vx, vy, vz, device=device) if config.predict_flow else None
+    flow_mask     = torch.randint(0, 2, (B, vx, vy, vz), device=device) if config.predict_flow else None
+    orient_target = torch.randn(B, 1, vx, vy, vz, device=device) if config.predict_orientation else None
+    angvel_target = torch.randn(B, 1, vx, vy, vz, device=device) if config.predict_angular_vel else None
+
+    losses = criterion(outputs, target, flow_target, flow_mask, orient_target, angvel_target)
     print(f"  total  = {losses['total'].item():.4f}")
     print(f"  ce     = {losses['ce'].item():.4f}")
-    print(f"  lovasz = {losses['lovasz'].item():.4f}")
+    if 'flow' in losses:
+        print(f"  flow   = {losses['flow'].item():.4f}")
+    if 'orient' in losses:
+        print(f"  orient = {losses['orient'].item():.4f}")
+    if 'angvel' in losses:
+        print(f"  angvel = {losses['angvel'].item():.4f}")
 
     # =====================================================================
     sep("8. 反向传播测试")
@@ -235,8 +251,8 @@ def main():
     feats2 = patch_embed(images)
     enc2 = encoder(feats2, intrinsics, extrinsics)
     vox2, _ = decoder(enc2, intrinsics, extrinsics)
-    logits2 = head(vox2)
-    losses2 = criterion(logits2, target)
+    outputs2 = head(vox2)
+    losses2 = criterion(outputs2, target, flow_target, flow_mask, orient_target, angvel_target)
     losses2['total'].backward()
 
     gpu_mem("after backward")
@@ -276,9 +292,12 @@ def main():
       → fine    [B, {fx}, {fy}, {fz}, {config.embed_dim}]
 
   VoxelHead (trilinear upsample + Conv3d):
-    → logits    [B, {config.num_classes}, {vx}, {vy}, {vz}]
+    → semantic  [B, {config.num_classes}, {vx}, {vy}, {vz}]
+    → flow      [B,  2, {vx}, {vy}, {vz}]  (可选)
+    → orient    [B,  1, {vx}, {vy}, {vz}]  (可选)
+    → angvel    [B,  1, {vx}, {vy}, {vz}]  (可选)
 
-  Loss (CE + Lovász):
+  Loss (CE + Smooth-L1):
     → scalar
 
   输出:
