@@ -300,7 +300,8 @@ def capture_frame(frame_id: int, sim_step: int) -> bool:
         rgb_r, _raw_converter, _dng_writer)
     async_io.async_save_voxel(
         os.path.join(VOXEL_DIR, frame_str),
-        vg.semantic, vg.instance, vg.flow, vg.flow_mask)
+        vg.semantic, vg.instance, vg.flow, vg.flow_mask,
+        vg.orientation, vg.angular_vel)
 
     # 9. 帧元数据（扩展）
     timestamp_sec = sim_step / SIM_FPS

@@ -68,6 +68,11 @@ class StereoOccConfig:
     temporal_frames: int = 2
     memory_dim: int = 128  # 与 embed_dim 一致
 
+    # --- 多任务输出头 ---
+    predict_flow: bool = True         # 输出体素速度 (vx, vy)
+    predict_orientation: bool = True  # 输出 NPC 航向角
+    predict_angular_vel: bool = True  # 输出 NPC 角速度 ωz
+
     @property
     def feat_size(self) -> Tuple[int, int]:
         """RAWPatchEmbed 16x 下采样后的特征图尺寸

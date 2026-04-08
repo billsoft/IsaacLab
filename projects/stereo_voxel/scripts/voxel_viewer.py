@@ -1,17 +1,23 @@
-"""语义体素 3D 可视化工具 v3
+"""语义体素 3D 可视化工具 v4
 =========================
 Python HTTP 后端 + Three.js 前端（本地离线，无需 CDN）。
 
 功能：
-  - 3D 体素三种可视化模式（键盘 1/2/3 切换）
+  - 3D 体素四种可视化模式（键盘 1/2/3/4 切换）
       1. 语义模式：按语义类别着色
-      2. Flow速度模式：按 XY 平面速度大小热力图着色（蓝→绿→红）
+      2. Flow速度模式：Middlebury 光流色轮着色（色相=方向，亮度=速度）
       3. 实例ID模式：每个实例唯一颜色
+      4. 方向/角速度模式：色相=航向角，亮度=角速度大小
   - 同步左右眼立体图像
   - Meta 信息面板（相机位置、偏航角、NPC角速度、Flow统计）
   - 类别图例（语义模式，点击可切换显示/隐藏）
   - 速度色阶（Flow 模式）
   - 帧导航（滑块 + 键盘 ← →）
+  - 俯视/默认视角切换（键盘 T）
+
+坐标系对齐：
+  Three.js X = 体素 j（图像右方向），Three.js Z = -体素 i（图像下方向取反），
+  确保俯视图与鸟瞰图像方向一致。
 
 运行（仅需 numpy，不需要 Isaac Sim）：
     C:\\ProgramData\\anaconda3\\envs\\carla\\python.exe projects/stereo_voxel/scripts/voxel_viewer.py
@@ -93,12 +99,16 @@ def load_voxels_json(data_dir, fid):
         inst = np.zeros_like(sem, dtype=np.int32)
 
     # Flow 数据：(NX, NY, NZ, 2) float16 [vx, vy], mask uint8
+    # 方向数据：orientation (NX,NY,NZ) float16，angular_vel (NX,NY,NZ) float16
     flow_path = os.path.join(data_dir, "voxel", f"frame_{fid:06d}_flow.npz")
     flow_list = []
+    orient_list = []
     if os.path.isfile(flow_path):
         fd = np.load(flow_path)
         flow_arr = fd["flow"].astype(np.float32)   # (NX,NY,NZ,2)
         flow_mask = fd["flow_mask"]                # (NX,NY,NZ) uint8
+        orient_arr = fd["orientation"].astype(np.float32) if "orientation" in fd else None
+        angvel_arr = fd["angular_vel"].astype(np.float32) if "angular_vel" in fd else None
         flow_idx = np.argwhere(flow_mask == 1)
         for r in flow_idx:
             i, j, k = int(r[0]), int(r[1]), int(r[2])
@@ -106,6 +116,10 @@ def load_voxels_json(data_dir, fid):
             vy = float(flow_arr[i, j, k, 1])
             speed = float(np.sqrt(vx ** 2 + vy ** 2))
             flow_list.append([i, j, k, round(vx, 4), round(vy, 4), round(speed, 4)])
+            if orient_arr is not None and angvel_arr is not None:
+                ori = float(orient_arr[i, j, k])
+                av  = float(angvel_arr[i, j, k])
+                orient_list.append([i, j, k, round(ori, 4), round(av, 4)])
 
     # 占用体素（排除 FREE 和 UNOBSERVED）
     mask = (sem != FREE) & (sem != UNOBSERVED)
@@ -124,7 +138,7 @@ def load_voxels_json(data_dir, fid):
     stats["255"] = int(np.sum(sem == UNOBSERVED))
     stats["total"] = int(sem.size)
 
-    return {"voxels": voxels, "flow": flow_list, "stats": stats}
+    return {"voxels": voxels, "flow": flow_list, "orient": orient_list, "stats": stats}
 
 
 def load_meta(data_dir, fid):
@@ -256,6 +270,10 @@ canvas{display:block;width:100%;height:100%}
   <button class="mode-btn active" id="btn-sem" onclick="setMode('sem')" title="键盘 1">语义</button>
   <button class="mode-btn" id="btn-flow" onclick="setMode('flow')" title="键盘 2">Flow速度</button>
   <button class="mode-btn" id="btn-inst" onclick="setMode('inst')" title="键盘 3">实例ID</button>
+  <button class="mode-btn" id="btn-orient" onclick="setMode('orient')" title="键盘 4">方向/角速度</button>
+  <div class="sep"></div>
+  <button onclick="setTopView()" title="键盘 T">俯视</button>
+  <button onclick="setDefaultView()" title="键盘 R">默认视角</button>
 </div>
 
 <div class="main">
@@ -275,7 +293,7 @@ canvas{display:block;width:100%;height:100%}
     <div class="hud" id="hud">—</div>
     <div class="legend" id="legend"></div>
     <div id="ld">Loading&hellip;</div>
-    <div class="keys">← → 切帧 &nbsp;|&nbsp; 1/2/3 切模式 &nbsp;|&nbsp; 拖拽旋转 滚轮缩放 右键平移</div>
+    <div class="keys">← → 切帧 &nbsp;|&nbsp; 1/2/3/4 切模式 &nbsp;|&nbsp; T 俯视  R 默认 &nbsp;|&nbsp; 拖拽旋转 滚轮缩放 右键平移</div>
   </div>
 </div>
 
@@ -289,7 +307,7 @@ const CI = __CLASS_JSON__;
 const VS = 0.1, NX = 72, NY = 60, NZ = 32, CX = 36, CY = 30, ZG = 7;
 
 let frames = [], ci = 0, hidden = new Set();
-let curVox = [], curFlow = [], curMode = 'sem';
+let curVox = [], curFlow = [], curOrient = [], curMode = 'sem';
 let mesh = null;
 window._lastStats = {};
 
@@ -303,7 +321,7 @@ ren.setClearColor(0x0d1117);
 
 const sc = new THREE.Scene();
 const cam = new THREE.PerspectiveCamera(45, 1, 0.05, 300);
-cam.position.set(6, 5, 6);
+cam.position.set(5, 5, 5);
 
 const ctrl = new THREE.OrbitControls(cam, cvs);
 ctrl.enableDamping = true;
@@ -314,29 +332,41 @@ ctrl.target.set(0, 0.8, 0);
 sc.add(new THREE.AmbientLight(0xffffff, 1.0));
 sc.add(new THREE.GridHelper(8, 40, 0x222e3f, 0x161f2b));
 
-/* 体素网格包围框线框 */
+/* 体素网格包围框线框
+   坐标映射：Three.js X = voxel j (图像右), Y = voxel k (高度), Z = -voxel i (图像上)
+   宽度方向=NY*VS(j轴), 高度=NZ*VS(k轴), 深度=NX*VS(i轴) */
 (function () {
-  const g = new THREE.BoxGeometry(NX * VS, NZ * VS, NY * VS);
+  const g = new THREE.BoxGeometry(NY * VS, NZ * VS, NX * VS);
   const e = new THREE.EdgesGeometry(g);
   const l = new THREE.LineSegments(e, new THREE.LineBasicMaterial({ color: 0x2d3f55, transparent: true, opacity: 0.6 }));
   l.position.set(0, -ZG * VS + NZ * VS / 2, 0);
   sc.add(l);
 })();
 
-/* 坐标轴（体素网格角落） */
+/* 坐标轴（体素网格角落）— 红=X(图像右/-j+), 绿=Y(上/k+), 蓝=Z(图像上方/-i) */
 const ax = new THREE.AxesHelper(1.0);
-ax.position.set(-NX * VS / 2, -ZG * VS, -NY * VS / 2);
+ax.position.set(NY * VS / 2, -ZG * VS, NX * VS / 2);
 sc.add(ax);
+
+/* 相机投影点标记（网格中心，地面高度） */
+(function () {
+  const geoRing = new THREE.RingGeometry(0.08, 0.12, 16);
+  const matRing = new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(geoRing, matRing);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(0, (-ZG + 0.5) * VS + 0.01, 0);
+  sc.add(ring);
+})();
 
 /* 地面层标记线 */
 (function () {
-  const y = (-ZG + 0.5) * VS;  // z=7 体素中心高度
+  const y = (-ZG + 0.5) * VS;
   const pts = [
-    new THREE.Vector3(-NX * VS / 2, y, -NY * VS / 2),
-    new THREE.Vector3(NX * VS / 2, y, -NY * VS / 2),
-    new THREE.Vector3(NX * VS / 2, y, NY * VS / 2),
-    new THREE.Vector3(-NX * VS / 2, y, NY * VS / 2),
-    new THREE.Vector3(-NX * VS / 2, y, -NY * VS / 2),
+    new THREE.Vector3(NY * VS / 2, y, -NX * VS / 2),
+    new THREE.Vector3(-NY * VS / 2, y, -NX * VS / 2),
+    new THREE.Vector3(-NY * VS / 2, y, NX * VS / 2),
+    new THREE.Vector3(NY * VS / 2, y, NX * VS / 2),
+    new THREE.Vector3(NY * VS / 2, y, -NX * VS / 2),
   ];
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   sc.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x3d5270, transparent: true, opacity: 0.5 })));
@@ -348,14 +378,19 @@ sc.add(ax);
 const boxG = new THREE.BoxGeometry(VS * 0.87, VS * 0.87, VS * 0.87);
 
 /* 体素索引 → Three.js 世界坐标
-   体素坐标系：i=X轴, j=Y轴(深度), k=Z轴(高度)
-   Three.js：X=右, Y=上, Z=前（右手系）
+   体素坐标系：i=世界X(图像下), j=世界Y(图像右), k=世界Z(高度)
+   Three.js：X=右, Y=上, Z=前（向观察者）
+
+   对齐规则（俯视图与鸟瞰图像一致）：
+     Three.js X = -(voxel j − CY) → 图像右方向 (calibration: left=+Y, right=-Y)
+     Three.js Y = voxel k − ZG   → 高度
+     Three.js Z = −(voxel i − CX) → 图像上方向（i+ = 图像下 = Three.js −Z）
 */
 function v2p(i, j, k) {
   return new THREE.Vector3(
-    (i - CX + 0.5) * VS,   // X
-    (k - ZG + 0.5) * VS,   // Y（高度，ZG 为地面层）
-    (j - CY + 0.5) * VS    // Z（深度）
+    -(j - CY + 0.5) * VS,     // X = 图像右 (voxel j 取反)
+    (k - ZG + 0.5) * VS,      // Y = 高度 (voxel k)
+    -(i - CX + 0.5) * VS      // Z = 图像上 (voxel i 取反)
   );
 }
 
@@ -369,11 +404,27 @@ function semClr(cid) {
   return new THREE.Color(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255);
 }
 
-/* Flow速度颜色：蓝(0)→绿(mid)→红(max)，HSL hue 240°→0° */
-function flowClr(speed, maxSpd) {
+/* Middlebury 光流色轮：色相=运动方向(vx,vy), 亮度=速度归一化
+   这是计算机视觉中光流可视化的标准方法 */
+function flowClr(vx, vy, maxSpd) {
+  const c = new THREE.Color();
+  const speed = Math.sqrt(vx * vx + vy * vy);
+  const t = (maxSpd > 0.001) ? Math.min(speed / maxSpd, 1.0) : 0.0;
+  if (speed < 1e-6) { c.setHSL(0, 0, 0.2); return c; }
+  // atan2(vy, vx) → [0, 1] 色相环
+  const angle = Math.atan2(vy, vx);
+  const hue = ((angle / (2 * Math.PI)) + 1.0) % 1.0;
+  // 速度 → 亮度：静止暗，快速亮
+  const light = 0.25 + 0.40 * t;
+  c.setHSL(hue, 1.0, light);
+  return c;
+}
+
+/* 热力图速度颜色（备用）：蓝(0)→绿(mid)→红(max) */
+function speedHeatClr(speed, maxSpd) {
   const t = (maxSpd > 0.001) ? Math.min(speed / maxSpd, 1.0) : 0.0;
   const c = new THREE.Color();
-  c.setHSL((1.0 - t) * 0.667, 1.0, 0.5);  // 240°→0°
+  c.setHSL((1.0 - t) * 0.667, 1.0, 0.5);
   return c;
 }
 
@@ -428,16 +479,16 @@ function rebuild() {
     const maxSpd = Math.max(...pts.map(f => f[5]), 0.001);
     const im = new THREE.InstancedMesh(boxG, mat, pts.length);
     for (let n = 0; n < pts.length; n++) {
-      const [i, j, k, , , spd] = pts[n];
+      const [i, j, k, vx, vy, spd] = pts[n];
       dm.position.copy(v2p(i, j, k)); dm.updateMatrix();
       im.setMatrixAt(n, dm.matrix);
-      im.setColorAt(n, flowClr(spd, maxSpd));
+      im.setColorAt(n, flowClr(vx, vy, maxSpd));
     }
     im.instanceMatrix.needsUpdate = true;
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
     sc.add(im); mesh = im;
 
-  } else {  // inst
+  } else if (curMode === 'inst') {
     const pts = curVox;
     updHud(pts.length, pts.length);
     if (!pts.length) { mkLeg(); return; }
@@ -452,13 +503,35 @@ function rebuild() {
     im.instanceMatrix.needsUpdate = true;
     if (im.instanceColor) im.instanceColor.needsUpdate = true;
     sc.add(im); mesh = im;
+
+  } else {  // orient — 按航向角色轮着色，亮度反映角速度大小
+    const pts = curOrient;
+    updHud(pts.length, curVox.length);
+    if (!pts.length) { mkLeg(); return; }
+
+    const maxAv = Math.max(...pts.map(p => Math.abs(p[4])), 0.001);
+    const im = new THREE.InstancedMesh(boxG, mat, pts.length);
+    for (let n = 0; n < pts.length; n++) {
+      const [i, j, k, ori, av] = pts[n];
+      dm.position.copy(v2p(i, j, k)); dm.updateMatrix();
+      im.setMatrixAt(n, dm.matrix);
+      // 航向角 → 色轮（0=红, π=青, -π=红，连续色环）
+      const hue = ((ori / (2 * Math.PI)) + 1.0) % 1.0;
+      // 角速度大小 → 亮度 0.35(静止) ~ 0.65(最大)
+      const light = 0.35 + 0.30 * Math.min(Math.abs(av) / maxAv, 1.0);
+      const c = new THREE.Color(); c.setHSL(hue, 1.0, light);
+      im.setColorAt(n, c);
+    }
+    im.instanceMatrix.needsUpdate = true;
+    if (im.instanceColor) im.instanceColor.needsUpdate = true;
+    sc.add(im); mesh = im;
   }
 
   mkLeg();
 }
 
 function updHud(vis, total) {
-  const modeStr = { sem: '语义', flow: 'Flow速度', inst: '实例ID' }[curMode];
+  const modeStr = { sem: '语义', flow: 'Flow速度', inst: '实例ID', orient: '方向/角速度' }[curMode];
   document.getElementById('hud').textContent =
     '[' + modeStr + ']  显示: ' + vis.toLocaleString() +
     ' / 总占用: ' + total.toLocaleString() +
@@ -484,15 +557,41 @@ function mkLeg() {
 
   } else if (curMode === 'flow') {
     const maxSpd = curFlow.length ? Math.max(...curFlow.map(f => f[5]), 0) : 0;
-    el.innerHTML = '<h4>Flow 速度 (m/s)</h4>' +
+    el.innerHTML = '<h4>Flow 光流 (Middlebury)</h4>' +
+      '<div style="margin-bottom:4px;font-size:10px;color:var(--dim)">颜色 = 运动方向（色轮）</div>' +
+      '<canvas id="flowWheelCanvas" width="80" height="80"></canvas>' +
+      '<div style="margin-top:4px;font-size:10px;color:var(--dim)">亮度 = 速度大小</div>' +
       '<div class="grad-wrap">' +
-      '<div class="grad-strip"></div>' +
-      '<div class="grad-labs"><span>0</span><span>' + (maxSpd / 2).toFixed(3) + '</span><span>' + maxSpd.toFixed(3) + '</span></div>' +
+      '<div class="grad-strip" style="background:linear-gradient(to right,hsl(0,0%,15%),hsl(0,100%,65%))"></div>' +
+      '<div class="grad-labs"><span>0</span><span>' + (maxSpd / 2).toFixed(3) + '</span><span>' + maxSpd.toFixed(3) + ' m/s</span></div>' +
       '</div>' +
       '<div style="margin-top:6px;color:var(--dim)">动态体素: <b style="color:var(--accent)">' + curFlow.length + '</b></div>' +
       (maxSpd < 0.001 ? '<div style="color:#f87171;margin-top:3px;font-size:10px">⚠ 所有NPC静止 (speed≈0)</div>' : '');
+    // 绘制 Middlebury 色轮
+    requestAnimationFrame(() => {
+      const cv = document.getElementById('flowWheelCanvas'); if (!cv) return;
+      const ctx = cv.getContext('2d');
+      const cx = 40, cy = 40, r = 38;
+      for (let y = 0; y < 80; y++) {
+        for (let x = 0; x < 80; x++) {
+          const dx = x - cx, dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > r) continue;
+          const angle = Math.atan2(dy, dx);
+          const hue = ((angle / (2 * Math.PI)) + 1.0) % 1.0;
+          const sat = dist / r;
+          ctx.fillStyle = 'hsl(' + Math.round(hue * 360) + ',100%,' + Math.round(25 + 40 * sat) + '%)';
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+      // 方向标注
+      ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('+vx', cx, 9); ctx.fillText('-vx', cx, 78);
+      ctx.textAlign = 'left'; ctx.fillText('+vy', 60, cy + 3);
+      ctx.textAlign = 'right'; ctx.fillText('-vy', 20, cy + 3);
+    });
 
-  } else {
+  } else if (curMode === 'inst') {
     // 实例模式：列出所有 instance ID
     const idMap = {};
     curVox.forEach(v => { const id = v[4]; idMap[id] = (idMap[id] || 0) + 1; });
@@ -504,6 +603,42 @@ function mkLeg() {
         '<span class="lt">ID ' + id + '  <span style="color:var(--dim)">(' + cnt + ')</span></span></div>';
     });
     el.innerHTML = h;
+
+  } else {
+    // 方向/角速度模式：色轮 + 亮度条 + 统计
+    const maxAv = curOrient.length ? Math.max(...curOrient.map(p => Math.abs(p[4])), 0) : 0;
+    el.innerHTML = '<h4>方向 / 角速度</h4>' +
+      '<div style="margin-bottom:4px;font-size:10px;color:var(--dim)">颜色 = 航向角（色轮）</div>' +
+      '<canvas id="cwCanvas" width="80" height="80"></canvas>' +
+      '<div style="margin-top:6px;font-size:10px;color:var(--dim)">亮度 = 角速度 |ωz|</div>' +
+      '<div class="grad-wrap">' +
+      '<div class="grad-strip" style="background:linear-gradient(to right,hsl(0,100%,35%),hsl(0,100%,65%))"></div>' +
+      '<div class="grad-labs"><span>0</span><span>' + (maxAv / 2).toFixed(3) + '</span><span>' + maxAv.toFixed(3) + ' rad/s</span></div>' +
+      '</div>' +
+      '<div style="margin-top:6px;color:var(--dim)">动态体素: <b style="color:var(--accent)">' + curOrient.length + '</b>' +
+      ' | 最大ωz: <b style="color:var(--accent)">' + maxAv.toFixed(3) + '</b> rad/s</div>';
+    // 绘制航向角色轮（圆形）
+    requestAnimationFrame(() => {
+      const cv = document.getElementById('cwCanvas'); if (!cv) return;
+      const ctx = cv.getContext('2d');
+      const cx = 40, cy = 40, r = 38;
+      for (let y = 0; y < 80; y++) {
+        for (let x = 0; x < 80; x++) {
+          const dx = x - cx, dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > r) continue;
+          const angle = Math.atan2(dy, dx);  // -π → +π
+          const hue = ((angle / (2 * Math.PI)) + 1.0) % 1.0;
+          ctx.fillStyle = 'hsl(' + Math.round(hue * 360) + ',100%,50%)';
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+      // 方向标注（对应航向角 heading）
+      ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('0°', cx, 9); ctx.fillText('±180°', cx, 78);
+      ctx.textAlign = 'left'; ctx.fillText('90°', 62, cy + 3);
+      ctx.textAlign = 'right'; ctx.fillText('-90°', 18, cy + 3);
+    });
   }
 }
 
@@ -514,10 +649,13 @@ function tog(c) { hidden.has(c) ? hidden.delete(c) : hidden.add(c); mkLeg(); reb
    ========================================================= */
 function setMode(m) {
   curMode = m;
-  ['sem', 'flow', 'inst'].forEach(k =>
+  ['sem', 'flow', 'inst', 'orient'].forEach(k =>
     document.getElementById('btn-' + k).classList.toggle('active', k === m)
   );
-  const titles = { sem: '统计 — 语义', flow: '统计 — Flow速度', inst: '统计 — 实例ID' };
+  const titles = {
+    sem: '统计 — 语义', flow: '统计 — Flow速度',
+    inst: '统计 — 实例ID', orient: '统计 — 方向/角速度'
+  };
   document.getElementById('statsTitle').textContent = titles[m];
   rebuild();
   fillStats(window._lastStats);
@@ -559,6 +697,7 @@ async function loadFrame(idx) {
     const d = await (await fetch('/api/voxel/' + fid)).json();
     curVox = d.voxels || [];
     curFlow = d.flow || [];
+    curOrient = d.orient || [];
     window._lastStats = d.stats || {};
     rebuild();
     fillStats(d.stats || {});
@@ -612,7 +751,7 @@ function fillStats(st) {
       '<div class="srow"><span class="sn">最大速度</span><span class="sc">' + maxSpd.toFixed(4) + ' m/s</span></div>' +
       '<div class="srow"><span class="sn">静止占比</span><span class="sc">' + (stationary / speeds.length * 100).toFixed(1) + '%</span></div>';
 
-  } else {
+  } else if (curMode === 'inst') {
     /* 实例模式统计 */
     const idMap = {};
     curVox.forEach(v => { const id = v[4]; idMap[id] = (idMap[id] || 0) + 1; });
@@ -625,6 +764,24 @@ function fillStats(st) {
         '<span class="sn">ID ' + id + '</span><span class="sc">' + cnt + ' (' + pct + '%)</span></div>';
     });
     el.innerHTML = h;
+
+  } else {
+    /* 方向/角速度模式统计 */
+    if (!curOrient.length) {
+      el.innerHTML = '<div style="color:var(--dim)">无动态体素（无 orientation 数据）</div>'; return;
+    }
+    const oris = curOrient.map(p => p[3]);
+    const avs = curOrient.map(p => Math.abs(p[4]));
+    const maxAv = Math.max(...avs, 0);
+    const meanAv = avs.reduce((a, b) => a + b, 0) / avs.length;
+    const meanOri = oris.reduce((a, b) => a + b, 0) / oris.length;
+    const oriMin = Math.min(...oris), oriMax = Math.max(...oris);
+    el.innerHTML =
+      '<div class="srow"><span class="sn">动态体素数</span><span class="sc">' + curOrient.length + '</span></div>' +
+      '<div class="srow"><span class="sn">航向角范围</span><span class="sc">' + oriMin.toFixed(2) + ' ~ ' + oriMax.toFixed(2) + ' rad</span></div>' +
+      '<div class="srow"><span class="sn">平均航向角</span><span class="sc">' + meanOri.toFixed(3) + ' rad (' + (meanOri * 180 / Math.PI).toFixed(1) + '°)</span></div>' +
+      '<div class="srow"><span class="sn">平均|ωz|</span><span class="sc">' + meanAv.toFixed(4) + ' rad/s</span></div>' +
+      '<div class="srow"><span class="sn">最大|ωz|</span><span class="sc">' + maxAv.toFixed(4) + ' rad/s</span></div>';
   }
 }
 
@@ -710,8 +867,23 @@ function chDir() {
   fetch('/api/set_dir', { method: 'POST', body: v }).then(() => init());
 }
 
+/* 俯视模式：相机正上方向下看，与鸟瞰图像对齐 */
+function setTopView() {
+  cam.position.set(0, 8, 0);
+  ctrl.target.set(0, 0, 0);
+  cam.up.set(0, 0, -1);  // -Z 朝上（图像上方 = voxel -i = Three.js +Z 的负方向）
+  ctrl.update();
+}
+
+function setDefaultView() {
+  cam.position.set(5, 5, 5);
+  ctrl.target.set(0, 0.8, 0);
+  cam.up.set(0, 1, 0);
+  ctrl.update();
+}
+
 document.addEventListener('keydown', function (e) {
-  if (e.target.tagName === 'INPUT') return;  // 在输入框时不拦截
+  if (e.target.tagName === 'INPUT') return;
   if (e.key === 'ArrowLeft' || e.key === 'a') go(-1);
   if (e.key === 'ArrowRight' || e.key === 'd') go(+1);
   if (e.key === 'Home') go(0, 0);
@@ -719,6 +891,9 @@ document.addEventListener('keydown', function (e) {
   if (e.key === '1') setMode('sem');
   if (e.key === '2') setMode('flow');
   if (e.key === '3') setMode('inst');
+  if (e.key === '4') setMode('orient');
+  if (e.key === 't' || e.key === 'T') setTopView();
+  if (e.key === 'r' || e.key === 'R') setDefaultView();
 });
 
 /* =========================================================

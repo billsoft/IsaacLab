@@ -59,8 +59,9 @@ class StereoOccNet(nn.Module):
         voxel_feats, new_memory = self.decoder(                             # [B, fx, fy, fz, C]
             feats, intrinsics, extrinsics, memory, ego_motion,
         )
-        logits = self.head(voxel_feats)                                     # [B, 18, 72, 60, 32]
-        return {'semantic': logits, 'memory': new_memory}
+        head_out = self.head(voxel_feats)                                   # dict of tensors
+        head_out['memory'] = new_memory
+        return head_out
 
     def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

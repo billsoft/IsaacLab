@@ -17,7 +17,7 @@ from voxel_grid import VoxelGrid
 
 
 class VoxelGridV2(VoxelGrid):
-    """扩展体素网格：instance→uint16，新增 flow + flow_mask。"""
+    """扩展体素网格：instance→uint16，新增 flow/flow_mask/orientation/angular_vel。"""
 
     INSTANCE_UNOBSERVED: int = 65535
 
@@ -25,9 +25,12 @@ class VoxelGridV2(VoxelGrid):
         super().__init__()
         # 覆盖父类的 int32 instance 为 uint16
         self.instance = np.zeros((self.NX, self.NY, self.NZ), dtype=np.uint16)
-        # 新增 flow 字段
+        # flow 字段：速度 (vx, vy) + 掩码
         self.flow = np.zeros((self.NX, self.NY, self.NZ, 2), dtype=np.float16)
         self.flow_mask = np.zeros((self.NX, self.NY, self.NZ), dtype=np.uint8)
+        # 方向字段：航向角（体素局部坐标系，弧度，[-π,π]）+ 角速度 ωz（rad/s）
+        self.orientation = np.zeros((self.NX, self.NY, self.NZ), dtype=np.float16)
+        self.angular_vel = np.zeros((self.NX, self.NY, self.NZ), dtype=np.float16)
 
     def reset(self):
         """重置所有字段。"""
@@ -35,6 +38,8 @@ class VoxelGridV2(VoxelGrid):
         self.instance[:] = 0
         self.flow[:] = 0
         self.flow_mask[:] = 0
+        self.orientation[:] = 0
+        self.angular_vel[:] = 0
 
     def save(self, path_prefix: str):
         """保存体素数据（semantic + instance + flow）。"""
@@ -42,11 +47,12 @@ class VoxelGridV2(VoxelGrid):
         np.savez_compressed(f"{path_prefix}_semantic.npz", data=self.semantic)
         np.savez_compressed(f"{path_prefix}_instance.npz", data=self.instance)
         np.savez_compressed(f"{path_prefix}_flow.npz",
-                            flow=self.flow, flow_mask=self.flow_mask)
+                            flow=self.flow, flow_mask=self.flow_mask,
+                            orientation=self.orientation, angular_vel=self.angular_vel)
 
     @classmethod
     def load(cls, path_prefix: str) -> "VoxelGridV2":
-        """从文件加载体素数据（兼容 v1 int32 instance）。"""
+        """从文件加载体素数据（兼容旧版无 orientation/angular_vel 的 npz）。"""
         vg = cls()
         vg.semantic = np.load(f"{path_prefix}_semantic.npz")["data"]
 
@@ -58,6 +64,10 @@ class VoxelGridV2(VoxelGrid):
             data = np.load(flow_path)
             vg.flow = data["flow"]
             vg.flow_mask = data["flow_mask"]
+            if "orientation" in data:
+                vg.orientation = data["orientation"]
+            if "angular_vel" in data:
+                vg.angular_vel = data["angular_vel"]
 
         return vg
 

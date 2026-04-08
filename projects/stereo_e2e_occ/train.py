@@ -41,6 +41,16 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch,
 
         is_sequence = images.dim() == 6  # [B, T, N, C, H, W]
 
+        # 回归标签（可选，无则为 None）
+        flow_target   = batch.get('flow',        None)
+        flow_mask     = batch.get('flow_mask',   None)
+        orient_target = batch.get('orientation', None)
+        angvel_target = batch.get('angular_vel', None)
+        if flow_target   is not None: flow_target   = flow_target.to(device)
+        if flow_mask     is not None: flow_mask     = flow_mask.to(device)
+        if orient_target is not None: orient_target = orient_target.to(device)
+        if angvel_target is not None: angvel_target = angvel_target.to(device)
+
         loss_val = 0.0
         ce_loss_val = 0.0
 
@@ -62,6 +72,10 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch,
                     img_t = images[:, t]
                     vox_t = voxels[:, t]
                     ext_t = extrinsics[:, t]
+                    fl_t  = flow_target[:,   t] if flow_target   is not None else None
+                    fm_t  = flow_mask[:,     t] if flow_mask     is not None else None
+                    or_t  = orient_target[:, t] if orient_target is not None else None
+                    av_t  = angvel_target[:, t] if angvel_target is not None else None
 
                     ego_motion = None
                     if t > 0:
@@ -72,7 +86,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch,
 
                     with torch.amp.autocast('cuda', enabled=use_amp):
                         outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
-                        loss_dict = criterion(outputs['semantic'], vox_t)
+                        loss_dict = criterion(outputs, vox_t, fl_t, fm_t, or_t, av_t)
                         time_weight = 1.0 + (t / max(1, T - 1))
                         chunk_loss = chunk_loss + loss_dict['total'] * time_weight
                         total_weight += time_weight
@@ -89,7 +103,8 @@ def train_epoch(model, loader, criterion, optimizer, scaler, device, epoch,
         else:
             with torch.amp.autocast('cuda', enabled=use_amp):
                 outputs = model(images, intrinsics, extrinsics)
-                losses = criterion(outputs['semantic'], voxels)
+                losses = criterion(outputs, voxels,
+                                   flow_target, flow_mask, orient_target, angvel_target)
                 loss = losses['total'] / grad_accum_steps
                 loss_val = losses['total'].item()
                 ce_loss_val = losses['ce'].item()
@@ -128,6 +143,15 @@ def validate(model, loader, criterion, device):
             intrinsics = batch['intrinsics'].to(device)
             extrinsics = batch['extrinsics'].to(device)
 
+            flow_target   = batch.get('flow',        None)
+            flow_mask     = batch.get('flow_mask',   None)
+            orient_target = batch.get('orientation', None)
+            angvel_target = batch.get('angular_vel', None)
+            if flow_target   is not None: flow_target   = flow_target.to(device)
+            if flow_mask     is not None: flow_mask     = flow_mask.to(device)
+            if orient_target is not None: orient_target = orient_target.to(device)
+            if angvel_target is not None: angvel_target = angvel_target.to(device)
+
             is_sequence = images.dim() == 6
             if is_sequence:
                 B, T, N, C, H, W = images.shape
@@ -137,19 +161,24 @@ def validate(model, loader, criterion, device):
                     img_t = images[:, t]
                     vox_t = voxels[:, t]
                     ext_t = extrinsics[:, t]
+                    fl_t  = flow_target[:,   t] if flow_target   is not None else None
+                    fm_t  = flow_mask[:,     t] if flow_mask     is not None else None
+                    or_t  = orient_target[:, t] if orient_target is not None else None
+                    av_t  = angvel_target[:, t] if angvel_target is not None else None
                     ego_motion = None
                     if t > 0:
                         pose_t = ext_t[:, 0]
                         pose_prev = extrinsics[:, t - 1][:, 0]
                         ego_motion = torch.linalg.inv(pose_t) @ pose_prev
                     outputs = model(img_t, intrinsics, ext_t, memory=memory, ego_motion=ego_motion)
-                    loss_dict = criterion(outputs['semantic'], vox_t)
+                    loss_dict = criterion(outputs, vox_t, fl_t, fm_t, or_t, av_t)
                     seq_loss += loss_dict['total'].item()
                     memory = outputs['memory']
                 total_loss += seq_loss / T
             else:
                 outputs = model(images, intrinsics, extrinsics)
-                losses = criterion(outputs['semantic'], voxels)
+                losses = criterion(outputs, voxels,
+                                   flow_target, flow_mask, orient_target, angvel_target)
                 total_loss += losses['total'].item()
 
     torch.cuda.empty_cache()

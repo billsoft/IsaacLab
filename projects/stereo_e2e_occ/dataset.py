@@ -160,6 +160,34 @@ class StereoOccDataset(Dataset):
 
         return torch.zeros(self.voxel_size, dtype=torch.long)
 
+    def _load_flow(self, frame_id):
+        """加载 flow/orientation/angular_vel 标签，返回 dict（键可能不存在）。
+
+        返回:
+            flow:        [2, X, Y, Z] float32  (vx, vy)
+            flow_mask:   [X, Y, Z]    uint8
+            orientation: [1, X, Y, Z] float32  航向角
+            angular_vel: [1, X, Y, Z] float32  ωz
+        """
+        npz_path = os.path.join(self.data_root, 'voxel', f'{frame_id}_flow.npz')
+        out = {}
+        vx, vy, vz = self.voxel_size
+        if not os.path.exists(npz_path):
+            return out
+        data = np.load(npz_path)
+        if 'flow' in data:
+            fl = data['flow'].astype(np.float32)          # (X, Y, Z, 2)
+            out['flow'] = torch.from_numpy(fl.transpose(3, 0, 1, 2))  # [2, X, Y, Z]
+        if 'flow_mask' in data:
+            out['flow_mask'] = torch.from_numpy(data['flow_mask'].astype(np.uint8))
+        if 'orientation' in data:
+            ori = data['orientation'].astype(np.float32)  # (X, Y, Z)
+            out['orientation'] = torch.from_numpy(ori).unsqueeze(0)   # [1, X, Y, Z]
+        if 'angular_vel' in data:
+            av = data['angular_vel'].astype(np.float32)   # (X, Y, Z)
+            out['angular_vel'] = torch.from_numpy(av).unsqueeze(0)    # [1, X, Y, Z]
+        return out
+
     def _load_meta(self, frame_id):
         """加载帧级元数据"""
         meta_path = os.path.join(self.data_root, 'meta', f'{frame_id}.json')
@@ -221,13 +249,18 @@ class StereoOccDataset(Dataset):
         intrinsics = self.intrinsics.clone()  # [2, 3, 3]
         extrinsics = self._get_extrinsics_for_frame(frame_id)  # [2, 4, 4]
 
-        return {
+        # 4. 回归标签（flow / orientation / angular_vel）
+        flow_data = self._load_flow(frame_id)
+
+        sample = {
             'images': images.float(),
             'voxels': voxels,
             'intrinsics': intrinsics,
             'extrinsics': extrinsics,
             'frame_id': frame_id,
         }
+        sample.update(flow_data)  # 存在则加入，不存在则 batch 中无该键
+        return sample
 
     def __len__(self):
         if self.sequence_length > 1:

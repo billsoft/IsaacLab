@@ -38,19 +38,28 @@ def async_save_dng(path: str, rgb_array: np.ndarray, raw_converter, dng_writer):
 def async_save_voxel(path_prefix: str, semantic: np.ndarray,
                      instance: np.ndarray,
                      flow: np.ndarray | None = None,
-                     flow_mask: np.ndarray | None = None):
-    """异步保存体素数据（semantic + instance + flow）。"""
-    def _save(pp, sem, ins, fl, fm):
+                     flow_mask: np.ndarray | None = None,
+                     orientation: np.ndarray | None = None,
+                     angular_vel: np.ndarray | None = None):
+    """异步保存体素数据（semantic + instance + flow + orientation + angular_vel）。"""
+    def _save(pp, sem, ins, fl, fm, ori, av):
         os.makedirs(os.path.dirname(pp), exist_ok=True)
         np.savez_compressed(f"{pp}_semantic.npz", data=sem)
         np.savez_compressed(f"{pp}_instance.npz", data=ins.astype(np.uint16))
         if fl is not None and fm is not None:
-            np.savez_compressed(f"{pp}_flow.npz", flow=fl, flow_mask=fm)
+            kw = {"flow": fl, "flow_mask": fm}
+            if ori is not None:
+                kw["orientation"] = ori
+            if av is not None:
+                kw["angular_vel"] = av
+            np.savez_compressed(f"{pp}_flow.npz", **kw)
     future = _save_pool.submit(
         _save, path_prefix,
         semantic.copy(), instance.copy(),
         flow.copy() if flow is not None else None,
         flow_mask.copy() if flow_mask is not None else None,
+        orientation.copy() if orientation is not None else None,
+        angular_vel.copy() if angular_vel is not None else None,
     )
     _pending_saves.append(future)
 
